@@ -14,6 +14,7 @@ from app.api import booking as booking_api
 from app.api import events as events_api
 from app.api import imports as imports_api
 from app.api import settings as settings_api
+from app.api import tickets as tickets_api
 from app.api import treks as treks_api
 from app.api import trekkers as trekkers_api
 from app.db import init_db
@@ -44,6 +45,7 @@ app.include_router(treks_api.router)
 app.include_router(trekkers_api.router)
 app.include_router(events_api.router)
 app.include_router(booking_api.router)
+app.include_router(tickets_api.router)
 
 
 @app.get("/api/health")
