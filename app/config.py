@@ -32,3 +32,6 @@ OCR_SPACE_KEY: str = os.environ.get("BB_OCR_SPACE_KEY", "helloworld")
 
 APP_NAME: str = "Karavan Booking Bot"
 APP_VERSION: str = "0.1.0"
+
+# DRY_RUN swaps the real portal client for an in-memory fake (no live requests).
+DRY_RUN: bool = os.environ.get("BB_DRY_RUN", "").lower() in ("1", "true", "yes")

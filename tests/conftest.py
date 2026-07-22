@@ -17,10 +17,12 @@ def client(tmp_path, monkeypatch):
     import app.models  # noqa: F401
     import app.services as services
     importlib.reload(services)
-    for name in ("app.import_.commit", "app.api.imports", "app.api.settings",
-                 "app.api.events", "app.api.accounts", "app.api.trekkers",
-                 "app.api.treks", "app.api.booking", "app.api.tickets",
-                 "app.api.dashboard"):
+    # Reload booking engine modules (state -> controller) before the API that
+    # binds the controller singleton, so each test gets a fresh one on the temp DB.
+    for name in ("app.import_.commit", "app.booking.state", "app.booking.controller",
+                 "app.api.imports", "app.api.settings", "app.api.events",
+                 "app.api.accounts", "app.api.trekkers", "app.api.treks",
+                 "app.api.booking", "app.api.tickets", "app.api.dashboard"):
         try:
             importlib.reload(importlib.import_module(name))
         except ModuleNotFoundError:
