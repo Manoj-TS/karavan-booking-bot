@@ -7,11 +7,12 @@ from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 
 from app import config
+from app.db import init_db
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # DB init + settings seeding are wired in the next build stage.
+    init_db()
     yield
 
 
