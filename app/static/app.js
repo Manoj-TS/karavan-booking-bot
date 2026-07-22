@@ -341,7 +341,7 @@ route("events", async () => {
           <span>${esc(t.name)} <span class="muted small">${esc(t.govt_id_type) || "no id"}</span></span></label>`).join("") || `<div class="muted">No trekkers yet.</div>`}
       </div>
       <div class="spacer"></div>
-      <button class="btn-primary btn-block" onclick="createEvent()">Create event</button>
+      <button class="btn-primary btn-block" onclick="saveEvent()">Create event</button>
     </div>
     <div class="card"><h2>Events</h2>
       ${events.map(e => `<div class="list-item">
@@ -355,7 +355,7 @@ route("events", async () => {
   });
   if (trekSel && trekSel.value) trekSel.dispatchEvent(new Event("change"));
 });
-async function createEvent() {
+async function saveEvent() {
   const trek_id = parseInt($("#eTrek").value); if (!trek_id) return toast("Add a trek first (More)");
   const trekker_ids = [...document.querySelectorAll(".rosterChk:checked")].map(c => parseInt(c.value));
   const body = { name: $("#eName").value.trim() || "Event", trek_id, check_in: $("#eDate").value.trim(),
@@ -556,7 +556,7 @@ async function importSeedTreks() {
 
 // expose handlers used inline
 Object.assign(window, { go, addAccount, resetAccount, delAccount, addTrekker, delTrekker,
-  parsePaste, uploadFile, importSeed, commitPreview, createEvent, startBooking, sendOtp,
+  parsePaste, uploadFile, importSeed, commitPreview, saveEvent, startBooking, sendOtp,
   sendCaptcha, reloadCaptcha, openPay, paidDone, cancelBooking, saveSettings, testProxy,
   addTrek, delTrek, importSeedTreks, render, setRange, histSearch, histDay, calMove,
   refreshTickets, ticketSearch, openCancel, doCancel });
