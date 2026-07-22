@@ -15,6 +15,9 @@ DATA_DIR: Path = _data_dir()
 DB_PATH: Path = DATA_DIR / "bookingbot.db"
 DB_URL: str = f"sqlite:///{DB_PATH.as_posix()}"
 
+# Legacy seed files (accounts.yaml / config.yaml) for the one-time import.
+SEED_DIR: Path = Path(os.environ.get("BB_SEED_DIR", "seed")).resolve()
+
 # Per-booking artifacts (captcha png, pay.html, ticket/receipt PDFs).
 ARTIFACTS_DIR: Path = DATA_DIR / "artifacts"
 ARTIFACTS_DIR.mkdir(parents=True, exist_ok=True)
