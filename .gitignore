@@ -1,0 +1,37 @@
+# --- Python ---
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# --- Virtual env ---
+.venv/
+venv/
+env/
+
+# --- Local data & secrets (NEVER commit) ---
+data/
+*.db
+*.sqlite3
+.env
+seed/config.yaml
+seed/accounts.yaml
+*.session
+session_cookies*.json
+used_ips.json
+
+# --- Booking artifacts ---
+pay.html
+captcha_*.png
+summaryblade_response.*
+ticket_*.pdf
+receipt_*.pdf
+previous_booking_ids.txt
+
+# --- OS / editor ---
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/

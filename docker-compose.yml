@@ -1,0 +1,17 @@
+services:
+  bookingbot:
+    build: .
+    image: bookingbot:latest
+    container_name: bookingbot
+    ports:
+      - "8000:8000"
+    environment:
+      # Override in a .env file or your host's secrets manager.
+      BB_DATA_DIR: /data
+      BB_SECRET_KEY: ${BB_SECRET_KEY:-change-me-in-production}
+    volumes:
+      - bookingbot-data:/data
+    restart: unless-stopped
+
+volumes:
+  bookingbot-data:
