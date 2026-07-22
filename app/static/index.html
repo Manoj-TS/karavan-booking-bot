@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#1f7a4d">
+  <title>Karavan Booking Bot</title>
+  <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+  <header class="app-header">
+    <h1>🏔️ Karavan</h1>
+    <div class="row" style="gap:8px">
+      <span id="dryBadge" class="badge-dry hidden">DRY RUN</span>
+      <span id="statusDot" class="status-dot">•</span>
+    </div>
+  </header>
+
+  <main id="view"><div class="card">Loading…</div></main>
+
+  <nav class="bottom-nav" id="nav">
+    <a data-route="dashboard"><span class="ico">🏠</span>Home</a>
+    <a data-route="events"><span class="ico">🎫</span>Events</a>
+    <a data-route="trekkers"><span class="ico">🥾</span>Trekkers</a>
+    <a data-route="accounts"><span class="ico">👥</span>Accounts</a>
+    <a data-route="more"><span class="ico">⚙️</span>More</a>
+  </nav>
+
+  <div id="toast"></div>
+  <script src="/static/app.js"></script>
+</body>
+</html>

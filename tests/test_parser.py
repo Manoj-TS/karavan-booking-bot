@@ -135,3 +135,15 @@ def test_whatsapp_style():
     pans = {r["govt_id"] for r in rows if r["govt_id"]}
     assert "CUZPR8774D" in pans
     assert "DWAPP6989J" in pans
+
+
+def test_inline_numbered_names():
+    text = ("1. Ravi Kumar 30 M 9876543210 ABCDE1234F\n"
+            "2. Priya S, Female, 25, 9123456780, voter ABC1234567")
+    rows = parse_trekkers_text(text)
+    assert len(rows) == 2
+    ravi = _by_name(rows, "Ravi Kumar")
+    assert ravi["age"] == 30 and ravi["gender"] == "Male"
+    assert ravi["govt_id_type"] == "pan" and ravi["govt_id"] == "ABCDE1234F"
+    priya = _by_name(rows, "Priya S")
+    assert priya["govt_id_type"] == "voter_id"

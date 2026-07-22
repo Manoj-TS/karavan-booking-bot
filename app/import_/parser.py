@@ -182,6 +182,34 @@ def _find_id(block: str) -> tuple[Optional[str], Optional[str]]:
     return best if best else (None, None)
 
 
+def _leading_name(block: str) -> Optional[str]:
+    """Extract a name from the START of an inline record like
+    '1. Ravi Kumar 30 M 9876543210 ABCDE1234F' or 'Priya S, Female, 25, ...'."""
+    first = block.splitlines()[0] if block.splitlines() else block
+    # strip list markers: "1.", "2)", "-", "*"
+    first = re.sub(r"^\s*(?:\d+\s*[.)]|[-*•])\s*", "", first).strip()
+    words = []
+    for raw in first.split():
+        w = raw.strip(",;:")
+        if not w:
+            continue
+        if any(ch.isdigit() for ch in w):
+            break
+        if _GENDER_RE.fullmatch(w):
+            break
+        if detect_id_type(w):
+            break
+        if w.lower() in _NOISE or w.lower() in _LABEL_LOOKUP:
+            break
+        if not re.match(r"^[A-Za-z][A-Za-z.]*$", w):
+            break
+        words.append(w)
+        if len(words) >= 4:
+            break
+    name = " ".join(words).strip()
+    return name or None
+
+
 def _looks_like_name(line: str) -> bool:
     if not line:
         return False
@@ -291,10 +319,21 @@ def _parse_block(block: str) -> ParsedTrekker:
     # Name: prefer a labeled name, else the first name-looking leftover line.
     rec.name = labeled.get("name")
     if not rec.name:
+        # Inline records ("1. Ravi Kumar 30 M 99.. PAN..") carry the name at the
+        # start of the line that also holds the id/mobile.
+        for l in block.splitlines():
+            if _find_id(l)[1] or _norm_mobile(l):
+                cand = _leading_name(l)
+                if cand and _looks_like_name(cand):
+                    rec.name = cand
+                    break
+    if not rec.name:
         for l in leftover_lines:
             if _looks_like_name(l):
                 rec.name = l.strip()
                 break
+    if not rec.name:
+        rec.name = _leading_name(block)
 
     # Age / gender / mobile — labels first, then scan the whole block.
     rec.age = (int(re.search(r"\d{1,3}", labeled["age"]).group())
