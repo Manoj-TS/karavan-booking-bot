@@ -61,3 +61,50 @@ class CommitResult(BaseModel):
     updated: int = 0
     skipped: int = 0
     messages: List[str] = []
+
+
+# --- Settings ---------------------------------------------------------------
+
+class SettingsRead(BaseModel):
+    booking_phone_number: Optional[str] = None
+    shared_default_password: Optional[str] = None
+    captcha_mode: str = "manual"
+    ocr_space_api_key: Optional[str] = None
+    proxy_enabled: bool = False
+    proxy_host: Optional[str] = None
+    proxy_port: Optional[int] = None
+    proxy_user: Optional[str] = None
+    proxy_pass: Optional[str] = None
+    proxy_country: str = "IN"
+    proxy_session_lifetime: str = "30m"
+    require_country: str = "IN"
+    ip_cooldown_days: int = 1
+    account_cooldown_days: int = 1
+
+
+class SettingsUpdate(BaseModel):
+    booking_phone_number: Optional[str] = None
+    shared_default_password: Optional[str] = None
+    captcha_mode: Optional[str] = None
+    ocr_space_api_key: Optional[str] = None
+    proxy_enabled: Optional[bool] = None
+    proxy_host: Optional[str] = None
+    proxy_port: Optional[int] = None
+    proxy_user: Optional[str] = None
+    proxy_pass: Optional[str] = None
+    proxy_country: Optional[str] = None
+    proxy_session_lifetime: Optional[str] = None
+    require_country: Optional[str] = None
+    ip_cooldown_days: Optional[int] = None
+    account_cooldown_days: Optional[int] = None
+
+
+class ProxyTestResult(BaseModel):
+    enabled: bool
+    ok: bool
+    ip: Optional[str] = None
+    country: Optional[str] = None
+    mode: str = "direct"
+    sticky_verified: bool = False
+    cooldown_conflict: bool = False
+    error: Optional[str] = None
