@@ -49,8 +49,9 @@ document.querySelectorAll(".bottom-nav a").forEach(a =>
 
 // --- dashboard -------------------------------------------------------------
 route("dashboard", async () => {
-  const [health, accSum, events] = await Promise.all([
+  const [health, accSum, events, dash] = await Promise.all([
     api("/api/health"), api("/api/accounts/summary"), api("/api/events"),
+    api("/api/dashboard/summary"),
   ]);
   $("#dryBadge").classList.toggle("hidden", !health.dry_run);
   const openEvents = events.filter(e => e.status !== "complete");
@@ -58,10 +59,10 @@ route("dashboard", async () => {
     <div class="card">
       <h2>Today</h2>
       <div class="grid-stats">
-        <div class="stat"><div class="n">${accSum.by_status.available}</div><div class="l">Accounts available</div></div>
-        <div class="stat"><div class="n">${accSum.used_today}</div><div class="l">Used today</div></div>
-        <div class="stat"><div class="n">${openEvents.length}</div><div class="l">Open events</div></div>
-        <div class="stat"><div class="n">${accSum.total}</div><div class="l">Total accounts</div></div>
+        <div class="stat"><div class="n">${dash.today.bookings}</div><div class="l">Bookings today</div></div>
+        <div class="stat"><div class="n">${dash.today.people}</div><div class="l">People booked</div></div>
+        <div class="stat"><div class="n">₹${dash.today.amount}</div><div class="l">Spent today</div></div>
+        <div class="stat"><div class="n">${accSum.by_status.available}</div><div class="l">Accounts free</div></div>
       </div>
     </div>
     <div class="card">
@@ -73,9 +74,122 @@ route("dashboard", async () => {
         </div>`).join("") : `<div class="muted">No open events. Create one under Events.</div>`}
     </div>
     <div class="card">
-      <div class="muted small">Proxy: test it under More → Settings before a real booking.</div>
+      <div class="row" style="gap:8px">
+        <button class="btn-block" onclick="go('history')">📅 History</button>
+        <button class="btn-block" onclick="go('tickets')">🎟️ Tickets</button>
+      </div>
+      <div class="muted small spacer">All-time: ${dash.all_time.bookings} bookings · ${dash.all_time.people} people · ₹${dash.all_time.amount}</div>
     </div>`);
 });
+
+// --- history (calendar + time chips + search) ------------------------------
+let _histRange = "month", _histCal = null;
+route("history", async () => {
+  const now = new Date();
+  if (!_histCal) _histCal = { y: now.getFullYear(), m: now.getMonth() + 1 };
+  await renderHistory("");
+});
+async function renderHistory(q, day) {
+  const cal = await api(`/api/dashboard/calendar?year=${_histCal.y}&month=${_histCal.m}`);
+  const bookings = await api(`/api/dashboard/bookings?range=${_histRange}${q ? "&q=" + encodeURIComponent(q) : ""}${day ? "&day=" + day : ""}`);
+  const chips = ["today", "week", "month", "all"].map(r =>
+    `<button class="btn-sm ${r === _histRange ? "btn-primary" : ""}" onclick="setRange('${r}')">${r}</button>`).join(" ");
+  setView(`
+    <div class="card">
+      <div class="row between"><h2>History</h2><div class="row" style="gap:6px">${chips}</div></div>
+      <input id="histQ" placeholder="Search trek / account / ref" value="${esc(q || "")}" oninput="histSearch(this.value)">
+    </div>
+    <div class="card">${calendarHTML(cal)}</div>
+    <div class="card"><h2>${day ? "Bookings on " + day : "Bookings"} (${bookings.length})</h2>
+      ${bookings.length ? bookings.map(b => `<div class="list-item">
+        <div><b>${esc(b.trek_name) || "?"}</b><div class="muted small">${esc(b.account_email) || ""} · ${esc(b.date)} · ${b.people}p · ₹${esc(b.amount) || "?"}</div></div>
+        <span class="pill ${b.state === "completed" ? "available" : "booked"}">${esc(b.state)}</span></div>`).join("")
+      : `<div class="muted">No bookings in range.</div>`}
+    </div>`);
+}
+function calendarHTML(cal) {
+  const first = new Date(cal.year, cal.month - 1, 1);
+  const startDow = first.getDay();
+  const days = new Date(cal.year, cal.month, 0).getDate();
+  const monthName = first.toLocaleString("en", { month: "long" });
+  let cells = "";
+  for (let i = 0; i < startDow; i++) cells += `<div></div>`;
+  for (let d = 1; d <= days; d++) {
+    const iso = `${cal.year}-${String(cal.month).padStart(2, "0")}-${String(d).padStart(2, "0")}`;
+    const n = cal.counts[iso] || 0;
+    cells += `<div class="cal-day ${n ? "has" : ""}" onclick="histDay('${iso}')">
+      <div class="cal-n">${d}</div>${n ? `<div class="cal-badge">${n}</div>` : ""}</div>`;
+  }
+  return `<div class="row between"><button class="btn-sm" onclick="calMove(-1)">‹</button>
+    <b>${monthName} ${cal.year}</b><button class="btn-sm" onclick="calMove(1)">›</button></div>
+    <div class="cal-grid">${["S","M","T","W","T","F","S"].map(x => `<div class="cal-h">${x}</div>`).join("")}${cells}</div>`;
+}
+function setRange(r) { _histRange = r; renderHistory($("#histQ")?.value || ""); }
+let _histT = null;
+function histSearch(v) { clearTimeout(_histT); _histT = setTimeout(() => renderHistory(v), 300); }
+function histDay(iso) { renderHistory($("#histQ")?.value || "", iso); }
+function calMove(delta) {
+  _histCal.m += delta;
+  if (_histCal.m < 1) { _histCal.m = 12; _histCal.y--; }
+  if (_histCal.m > 12) { _histCal.m = 1; _histCal.y++; }
+  renderHistory($("#histQ")?.value || "");
+}
+
+// --- tickets ---------------------------------------------------------------
+route("tickets", async () => {
+  const [tickets, accounts] = await Promise.all([
+    api("/api/tickets"), api("/api/accounts?status=booked"),
+  ]);
+  const accOpts = accounts.map(a => `<option value="${a.id}">${esc(a.email)}</option>`).join("");
+  setView(`
+    <div class="card"><h2>Refresh tickets</h2>
+      <div class="muted small">Log in an account and pull its tickets from the portal.</div>
+      <div class="field-inline" style="margin-top:8px">
+        <select id="tkAcc">${accOpts || `<option value="">no booked accounts</option>`}</select>
+        <button class="btn-primary" onclick="refreshTickets()">Refresh</button></div>
+      <div id="tkMsg"></div>
+    </div>
+    <div class="card"><div class="row between"><h2>Tickets (${tickets.length})</h2>
+      <input id="tkQ" placeholder="search" style="max-width:160px" oninput="ticketSearch(this.value)"></div>
+      ${tickets.length ? tickets.map(t => `<div class="list-item">
+        <div><b>${esc(t.trek) || "Ticket " + esc(t.portal_ref)}</b>
+          <div class="muted small">${esc(t.account_email)} · ${esc(t.check_in) || ""} · <span class="pill ${t.section === "cancelled" ? "disabled" : "available"}">${esc(t.section)}</span></div></div>
+        <div class="row" style="gap:6px">
+          <a class="btn-sm" href="/api/tickets/${t.id}/download" target="_blank">⬇</a>
+          ${t.cancellable ? `<button class="btn-sm btn-danger" onclick="openCancel(${t.id})">Cancel</button>` : ""}
+        </div></div>
+        <div id="cancel-${t.id}"></div>`).join("") : `<div class="muted">No tickets yet. Refresh an account above.</div>`}
+    </div>`);
+});
+async function refreshTickets() {
+  const id = $("#tkAcc").value; if (!id) return toast("No account");
+  $("#tkMsg").innerHTML = `<div class="muted small spacer">Logging in & fetching…</div>`;
+  try { const r = await api(`/api/tickets/refresh/${id}`, { method: "POST" });
+    toast(`Found ${r.found} tickets`); render(); } catch (e) { $("#tkMsg").innerHTML = `<div class="banner err spacer">${esc(e.message)}</div>`; }
+}
+let _tkT = null;
+async function ticketSearch(v) { clearTimeout(_tkT); _tkT = setTimeout(async () => {
+  const tickets = await api(`/api/tickets?q=${encodeURIComponent(v)}`);
+  toast(`${tickets.length} match`); }, 400); }
+async function openCancel(id) {
+  const box = $(`#cancel-${id}`);
+  box.innerHTML = `<div class="muted small">Loading cancellable trekkers…</div>`;
+  try {
+    const info = await api(`/api/tickets/${id}/cancel-info`);
+    if (info.error) { box.innerHTML = `<div class="banner err">${esc(info.error)}</div>`; return; }
+    box.innerHTML = `<div class="card" style="margin:8px 0">
+      ${info.visitors.map(v => `<label class="checkline"><input type="checkbox" class="cv-${id}" value="${esc(v.id)}">
+        <span>${esc(v.name) || "Visitor " + esc(v.id)}</span></label>`).join("") || `<div class="muted">No cancellable trekkers.</div>`}
+      <button class="btn-danger btn-block btn-sm" onclick="doCancel(${id})">Cancel selected</button></div>`;
+  } catch (e) { box.innerHTML = `<div class="banner err">${esc(e.message)}</div>`; }
+}
+async function doCancel(id) {
+  const ids = [...document.querySelectorAll(`.cv-${id}:checked`)].map(c => c.value);
+  if (!ids.length) return toast("Pick trekkers to cancel");
+  if (!confirm(`Cancel ${ids.length} trekker(s)? This cannot be undone.`)) return;
+  try { const r = await api(`/api/tickets/${id}/cancel`, { method: "POST", body: { visitor_ids: ids } });
+    toast(r.message); render(); } catch (e) { toast(e.message); }
+}
 
 // --- accounts --------------------------------------------------------------
 route("accounts", async () => {
@@ -444,7 +558,8 @@ async function importSeedTreks() {
 Object.assign(window, { go, addAccount, resetAccount, delAccount, addTrekker, delTrekker,
   parsePaste, uploadFile, importSeed, commitPreview, createEvent, startBooking, sendOtp,
   sendCaptcha, reloadCaptcha, openPay, paidDone, cancelBooking, saveSettings, testProxy,
-  addTrek, delTrek, importSeedTreks, render });
+  addTrek, delTrek, importSeedTreks, render, setRange, histSearch, histDay, calMove,
+  refreshTickets, ticketSearch, openCancel, doCancel });
 
 // boot
 if (!location.hash) location.hash = "#dashboard";

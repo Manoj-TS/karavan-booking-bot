@@ -141,6 +141,16 @@ input:focus, select:focus, textarea:focus {
   transition: opacity .2s; z-index: 60; max-width: 90%; }
 #toast.show { opacity: .96; }
 
+/* Calendar */
+.cal-grid { display: grid; grid-template-columns: repeat(7, 1fr); gap: 4px; margin-top: 10px; }
+.cal-h { text-align: center; font-size: 11px; color: var(--muted); padding: 2px 0; }
+.cal-day { position: relative; aspect-ratio: 1; border-radius: 8px; background: var(--surface-2);
+  display: flex; align-items: center; justify-content: center; font-size: 13px; cursor: pointer; }
+.cal-day.has { background: var(--primary); color: var(--primary-ink); font-weight: 700; }
+.cal-badge { position: absolute; top: 2px; right: 4px; font-size: 10px; background: var(--accent);
+  color: #fff; border-radius: 999px; padding: 0 5px; }
+.cal-n { line-height: 1; }
+
 .checkline { display: flex; align-items: center; gap: 10px; padding: 8px 4px; }
 .checkline input[type=checkbox] { width: 20px; height: 20px; min-height: 20px; flex: none; }
 .spacer { height: 8px; }

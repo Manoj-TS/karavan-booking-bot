@@ -5,7 +5,7 @@ response shapes live in schemas.py.
 """
 from __future__ import annotations
 
-from datetime import date, datetime, timezone
+from datetime import date, datetime
 from typing import List, Optional
 
 from sqlalchemy import JSON, Column, UniqueConstraint
@@ -23,8 +23,10 @@ TICKET_SECTIONS = ("booked", "cancelled")
 
 
 def _utcnow() -> datetime:
-    # Naive UTC (SQLite stores naive datetimes; keep them consistent).
-    return datetime.now(timezone.utc).replace(tzinfo=None)
+    # Local naive time. "Today" (account/IP cooldown, dashboard) must reset at the
+    # portal's local midnight (IST for the user), so all date comparisons use the
+    # machine's local date consistently — never mix UTC and local here.
+    return datetime.now()
 
 
 class Account(SQLModel, table=True):

@@ -11,6 +11,7 @@ from fastapi.staticfiles import StaticFiles
 from app import config
 from app.api import accounts as accounts_api
 from app.api import booking as booking_api
+from app.api import dashboard as dashboard_api
 from app.api import events as events_api
 from app.api import imports as imports_api
 from app.api import settings as settings_api
@@ -46,6 +47,7 @@ app.include_router(trekkers_api.router)
 app.include_router(events_api.router)
 app.include_router(booking_api.router)
 app.include_router(tickets_api.router)
+app.include_router(dashboard_api.router)
 
 
 @app.get("/api/health")
