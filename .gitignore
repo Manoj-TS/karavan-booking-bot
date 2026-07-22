@@ -13,6 +13,7 @@ env/
 
 # --- Local data & secrets (NEVER commit) ---
 data/
+data_dev/
 *.db
 *.sqlite3
 .env
