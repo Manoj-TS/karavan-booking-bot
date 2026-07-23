@@ -156,8 +156,10 @@ class ProxyManager:
 
         last_cooldown = False
         last_err = None
+        sticky_disabled = False  # auto-dropped if the gateway rejects the session token
         for attempt in range(1, MAX_IP_ATTEMPTS + 1):
-            sid = secrets.token_hex(4) if self.cfg.use_sticky else None
+            want_sticky = self.cfg.use_sticky and not sticky_disabled
+            sid = secrets.token_hex(4) if want_sticky else None
             url = build_proxy_url(self.cfg, sid)
             session = _new_session(url, pin=True)
             ip, country, err = check_exit_ip_verbose(session)
@@ -167,6 +169,15 @@ class ProxyManager:
                 _close(session)
                 if err and "407" in err:  # auth won't fix itself by retrying
                     break
+                # Sticky token rejected by the gateway (e.g. 500 tunnel error) ->
+                # drop sticky for the rest of this run and continue country-only.
+                if want_sticky and err and any(k in err for k in (
+                        "Tunnel connection failed", "500", "Unable to connect to proxy",
+                        "ProxyError")):
+                    sticky_disabled = True
+                    logger.warning("Sticky session rejected by the proxy gateway; "
+                                   "falling back to country-only + single pinned connection.")
+                    continue
                 time.sleep(1.0)
                 continue
             if self.cfg.require_country and country != self.cfg.require_country:
@@ -181,8 +192,8 @@ class ProxyManager:
                 _close(session)
                 time.sleep(0.3)
                 continue
-            # With sticky off we intentionally rely on the single pinned connection.
-            sticky = self._sticky_selftest(session, ip) if self.cfg.use_sticky else False
+            # Sticky self-test only when sticky is actually in use this run.
+            sticky = self._sticky_selftest(session, ip) if want_sticky else False
             mode = "proxy" if sticky else "fallback"
             return Acquisition(session, ip, country, mode=mode, sticky_verified=sticky)
 

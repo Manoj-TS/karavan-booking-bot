@@ -61,6 +61,24 @@ def test_sticky_off_uses_country_only(monkeypatch):
     assert acq.sticky_verified is False  # sticky self-test skipped
 
 
+def test_sticky_gateway_reject_auto_falls_back(monkeypatch):
+    # Sticky attempt gets a 500 tunnel error; the run drops sticky and succeeds
+    # country-only (mirrors the real Proxy-Cheap plan that rejects _session-).
+    cfg = ProxyConfig(enabled=True, user="u", password="p", require_country="IN",
+                      use_sticky=True)
+    results = iter([
+        (None, None, "Tunnel connection failed: 500 Internal Server Error"),  # sticky
+        ("49.36.190.100", "IN", None),                                        # country-only
+    ])
+    monkeypatch.setattr("app.portal.proxy.check_exit_ip_verbose",
+                        lambda s, close=False: next(results))
+    acq = ProxyManager(cfg).acquire()
+    assert acq.ip == "49.36.190.100"
+    assert acq.mode == "fallback"          # country-only + pinned connection
+    assert acq.sticky_verified is False
+    assert acq.error is None
+
+
 def test_407_reported_not_swallowed(monkeypatch):
     cfg = ProxyConfig(enabled=True, user="u", password="bad", require_country="IN")
     monkeypatch.setattr("app.portal.proxy.check_exit_ip_verbose",
