@@ -45,6 +45,9 @@ class ProxyConfig:
     country: str = "IN"
     session_lifetime: str = "30m"
     require_country: str = "IN"
+    # Some Proxy-Cheap plans reject the _session-/_lifetime- suffix (407). Turn
+    # sticky off to use country-only targeting + a single pinned connection.
+    use_sticky: bool = True
 
 
 @dataclass
@@ -89,13 +92,20 @@ def _new_session(proxy_url: Optional[str], pin: bool) -> requests.Session:
     return s
 
 
-def check_exit_ip(session: requests.Session, close: bool = False) -> tuple[Optional[str], Optional[str]]:
-    """Return (ip, country) as seen through this session, or (None, None)."""
+def check_exit_ip_verbose(session: requests.Session, close: bool = False
+                          ) -> tuple[Optional[str], Optional[str], Optional[str]]:
+    """Return (ip, country, error). error is the real reason all checks failed."""
     headers = {"Connection": "close"} if close else {}
+    last_err = None
     for url in IP_CHECK_URLS:
         try:
             r = session.get(url, timeout=15, headers=headers)
             if r.status_code != 200:
+                last_err = f"{url} -> HTTP {r.status_code}"
+                # 407 is the tell-tale: proxy auth / credential-format rejected.
+                if r.status_code == 407:
+                    return None, None, "Proxy authentication failed (HTTP 407) — " \
+                        "wrong credentials or the plan rejects this URL format."
                 continue
             j = r.json()
             ip = j.get("ip") or j.get("query") or j.get("ip_addr")
@@ -103,10 +113,16 @@ def check_exit_ip(session: requests.Session, close: bool = False) -> tuple[Optio
                        or j.get("countryCode") or "")
             country = str(country).upper()[:2]
             if ip:
-                return ip, country
-        except Exception:
+                return ip, country, None
+        except Exception as e:
+            last_err = f"{type(e).__name__}: {e}"
             continue
-    return None, None
+    return None, None, last_err or "No IP returned from any check endpoint."
+
+
+def check_exit_ip(session: requests.Session, close: bool = False) -> tuple[Optional[str], Optional[str]]:
+    ip, country, _ = check_exit_ip_verbose(session, close)
+    return ip, country
 
 
 class ProxyManager:
@@ -139,14 +155,18 @@ class ProxyManager:
             return Acquisition(session, ip, country, mode="direct")
 
         last_cooldown = False
+        last_err = None
         for attempt in range(1, MAX_IP_ATTEMPTS + 1):
-            sid = secrets.token_hex(4)
+            sid = secrets.token_hex(4) if self.cfg.use_sticky else None
             url = build_proxy_url(self.cfg, sid)
             session = _new_session(url, pin=True)
-            ip, country = check_exit_ip(session)
+            ip, country, err = check_exit_ip_verbose(session)
             if not ip:
-                logger.warning(f"attempt {attempt}: proxy gave no IP; retrying")
+                last_err = err
+                logger.warning(f"attempt {attempt}: no IP ({err}); retrying")
                 _close(session)
+                if err and "407" in err:  # auth won't fix itself by retrying
+                    break
                 time.sleep(1.0)
                 continue
             if self.cfg.require_country and country != self.cfg.require_country:
@@ -161,32 +181,53 @@ class ProxyManager:
                 _close(session)
                 time.sleep(0.3)
                 continue
-            sticky = self._sticky_selftest(session, ip)
+            # With sticky off we intentionally rely on the single pinned connection.
+            sticky = self._sticky_selftest(session, ip) if self.cfg.use_sticky else False
             mode = "proxy" if sticky else "fallback"
-            if not sticky:
-                logger.warning("Sticky session NOT confirmed — exit IP varied across "
-                               "connections. Running in single-connection fallback; IP "
-                               "stability now depends on one keep-alive connection.")
             return Acquisition(session, ip, country, mode=mode, sticky_verified=sticky)
 
         return Acquisition(None, None, None, mode="proxy",
                            cooldown_conflict=last_cooldown,
-                           error=f"Could not get a fresh Indian IP after {MAX_IP_ATTEMPTS} tries. "
-                                 f"Check the proxy credentials / balance, or turn the proxy off.")
+                           error=(last_err or f"Could not get an Indian IP after "
+                                  f"{MAX_IP_ATTEMPTS} tries.") + " (Check credentials/balance, "
+                                  "try turning sticky off, or disable the proxy.)")
+
+    def _probe(self, variant: str) -> dict:
+        """Try one credential format and report what happened."""
+        if variant == "bare":
+            url = f"http://{self.cfg.user}:{self.cfg.password}@{self.cfg.host}:{self.cfg.port}"
+        elif variant == "country":
+            url = build_proxy_url(ProxyConfig(**{**self.cfg.__dict__, "use_sticky": False}), None)
+        else:  # sticky
+            url = build_proxy_url(self.cfg, secrets.token_hex(4))
+        session = _new_session(url, pin=True)
+        ip, country, err = check_exit_ip_verbose(session)
+        _close(session)
+        return {"variant": variant, "ok": ip is not None, "ip": ip,
+                "country": country, "error": err}
 
     def test(self) -> dict:
-        """Acquire once and report — used by /api/proxy/test (no booking)."""
-        acq = self.acquire()
-        _close(acq.session)
+        """Staged diagnostic for /api/proxy/test: which credential format works?"""
+        if not self.cfg.enabled:
+            acq = self.acquire()
+            _close(acq.session)
+            return {"enabled": False, "ok": acq.ip is not None, "ip": acq.ip,
+                    "country": acq.country, "mode": "direct", "sticky_verified": False,
+                    "probes": [], "error": acq.error}
+        probes = [self._probe("bare"), self._probe("country"), self._probe("sticky")]
+        # Prefer the richest format that authenticates: sticky > country > bare.
+        best = next((p for p in reversed(probes) if p["ok"]), None)
+        error = None if best else (next((p["error"] for p in probes if p["error"]), None)
+                                   or "All credential formats failed.")
         return {
-            "enabled": self.cfg.enabled,
-            "ok": acq.error is None and acq.ip is not None,
-            "ip": acq.ip,
-            "country": acq.country,
-            "mode": acq.mode,
-            "sticky_verified": acq.sticky_verified,
-            "cooldown_conflict": acq.cooldown_conflict,
-            "error": acq.error,
+            "enabled": True,
+            "ok": best is not None,
+            "ip": best["ip"] if best else None,
+            "country": best["country"] if best else None,
+            "mode": (best["variant"] if best else "proxy"),
+            "sticky_verified": bool(best and best["variant"] == "sticky"),
+            "probes": probes,
+            "error": error,
         }
 
 

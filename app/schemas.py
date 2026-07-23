@@ -77,6 +77,7 @@ class SettingsRead(BaseModel):
     proxy_pass: Optional[str] = None
     proxy_country: str = "IN"
     proxy_session_lifetime: str = "30m"
+    proxy_use_sticky: bool = True
     require_country: str = "IN"
     ip_cooldown_days: int = 1
     account_cooldown_days: int = 1
@@ -94,6 +95,7 @@ class SettingsUpdate(BaseModel):
     proxy_pass: Optional[str] = None
     proxy_country: Optional[str] = None
     proxy_session_lifetime: Optional[str] = None
+    proxy_use_sticky: Optional[bool] = None
     require_country: Optional[str] = None
     ip_cooldown_days: Optional[int] = None
     account_cooldown_days: Optional[int] = None
@@ -106,5 +108,5 @@ class ProxyTestResult(BaseModel):
     country: Optional[str] = None
     mode: str = "direct"
     sticky_verified: bool = False
-    cooldown_conflict: bool = False
+    probes: List[dict] = []
     error: Optional[str] = None

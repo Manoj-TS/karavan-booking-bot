@@ -180,6 +180,7 @@ class AppSetting(SQLModel, table=True):
     proxy_pass: Optional[str] = None
     proxy_country: str = Field(default="IN")
     proxy_session_lifetime: str = Field(default="30m")
+    proxy_use_sticky: bool = Field(default=True)
 
     require_country: str = Field(default="IN")
     ip_cooldown_days: int = Field(default=1)      # today-only == 1

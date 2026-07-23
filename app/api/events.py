@@ -86,6 +86,29 @@ def create_event(body: EventIn, session: Session = Depends(get_session)) -> dict
     return _event_view(session, event)
 
 
+class EventPatch(BaseModel):
+    name: Optional[str] = None
+    trek_id: Optional[int] = None
+    check_in: Optional[str] = None
+    booking_phone: Optional[str] = None
+
+
+@router.patch("/{event_id}")
+def update_event(event_id: int, patch: EventPatch,
+                 session: Session = Depends(get_session)) -> dict:
+    event = session.get(Event, event_id)
+    if not event:
+        raise HTTPException(404, "Event not found.")
+    data = patch.model_dump(exclude_unset=True)
+    if "trek_id" in data and data["trek_id"] and not session.get(Trek, data["trek_id"]):
+        raise HTTPException(400, "Unknown trek.")
+    for field, value in data.items():
+        setattr(event, field, value)
+    session.add(event)
+    session.commit()
+    return _event_view(session, event)
+
+
 class RosterPatch(BaseModel):
     add: List[int] = []
     remove: List[int] = []

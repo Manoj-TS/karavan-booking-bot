@@ -49,11 +49,9 @@ document.querySelectorAll(".bottom-nav a").forEach(a =>
 
 // --- dashboard -------------------------------------------------------------
 route("dashboard", async () => {
-  const [health, accSum, events, dash] = await Promise.all([
-    api("/api/health"), api("/api/accounts/summary"), api("/api/events"),
-    api("/api/dashboard/summary"),
+  const [accSum, events, dash] = await Promise.all([
+    api("/api/accounts/summary"), api("/api/events"), api("/api/dashboard/summary"),
   ]);
-  $("#dryBadge").classList.toggle("hidden", !health.dry_run);
   const openEvents = events.filter(e => e.status !== "complete");
   setView(`
     <div class="card">
@@ -209,11 +207,33 @@ route("accounts", async () => {
         <div><b>${esc(a.email)}</b><div class="muted small">${a.last_used_date ? "used " + a.last_used_date : "never used"}</div></div>
         <div class="row" style="gap:6px">
           <span class="pill ${a.status}">${a.status}</span>
+          <button class="btn-sm" onclick="editAccount(${a.id})">Edit</button>
           ${a.status === "booked" ? `<button class="btn-sm" onclick="resetAccount(${a.id})">Reset</button>` : ""}
           <button class="btn-sm btn-danger" onclick="delAccount(${a.id})">✕</button>
-        </div></div>`).join("")}
+        </div></div>
+        <div id="ac-edit-${a.id}"></div>`).join("")}
     </div>`);
+  window.__accounts = Object.fromEntries(accts.map(a => [a.id, a]));
 });
+function editAccount(id) {
+  const a = (window.__accounts || {})[id]; if (!a) return;
+  const box = $(`#ac-edit-${id}`);
+  if (box.innerHTML) { box.innerHTML = ""; return; }
+  const sel = (v, o) => v === o ? "selected" : "";
+  box.innerHTML = `<div class="card" style="margin:6px 0">
+    <label>Password</label><input id="ae-pass-${id}" value="${esc(a.password || "")}" placeholder="(blank = shared default)">
+    <label>Status</label>
+    <select id="ae-status-${id}">${["available","booked","disabled"].map(x => `<option value="${x}" ${sel(a.status, x)}>${x}</option>`).join("")}</select>
+    <label>Notes</label><input id="ae-notes-${id}" value="${esc(a.notes || "")}">
+    <div class="spacer"></div>
+    <button class="btn-primary btn-block btn-sm" onclick="saveAccountEdit(${id})">Save changes</button></div>`;
+}
+async function saveAccountEdit(id) {
+  const g = f => ($(`#ae-${f}-${id}`) || {}).value;
+  const body = { password: g("pass").trim() || null, status: g("status"), notes: g("notes").trim() || null };
+  try { await api(`/api/accounts/${id}`, { method: "PATCH", body }); toast("Saved"); render(); }
+  catch (e) { toast(e.message); }
+}
 async function addAccount() {
   const email = $("#aEmail").value.trim(); if (!email) return toast("Email required");
   try { await api("/api/accounts", { method: "POST", body: { email, password: $("#aPass").value.trim() || null } });
@@ -244,11 +264,60 @@ route("trekkers", async () => {
       <button class="btn-primary btn-block" onclick="addTrekker()">Add trekker</button>
     </div>
     <div class="card">
+      <div class="row between"><h2>All trekkers</h2>
+        <button id="delSelBtn" class="btn-sm btn-danger hidden" onclick="deleteSelectedTrekkers()">Delete selected</button></div>
       ${trekkers.map(t => `<div class="list-item">
-        <div><b>${esc(t.name)}</b><div class="muted small">${t.age ?? "?"} · ${esc(t.gender) || "?"} · ${esc(t.govt_id_type) || "no id"} ${esc(t.govt_id) || ""}</div></div>
-        <button class="btn-sm btn-danger" onclick="delTrekker(${t.id})">✕</button></div>`).join("")}
+        <div class="row" style="gap:8px">
+          <input type="checkbox" class="tksel" value="${t.id}" onchange="updateDelSel()" style="width:18px;height:18px;min-height:18px">
+          <div><b>${esc(t.name)}</b><div class="muted small">${t.age ?? "?"} · ${esc(t.gender) || "?"} · ${esc(t.govt_id_type) || "no id"} ${esc(t.govt_id) || ""}</div></div>
+        </div>
+        <div class="row" style="gap:6px">
+          <button class="btn-sm" onclick="editTrekker(${t.id})">Edit</button>
+          <button class="btn-sm btn-danger" onclick="delTrekker(${t.id})">✕</button></div></div>
+        <div id="tk-edit-${t.id}"></div>`).join("")}
     </div>`);
+  window.__trekkers = Object.fromEntries(trekkers.map(t => [t.id, t]));
 });
+function updateDelSel() {
+  const n = document.querySelectorAll(".tksel:checked").length;
+  const btn = $("#delSelBtn"); if (!btn) return;
+  btn.classList.toggle("hidden", n === 0);
+  btn.textContent = `Delete selected (${n})`;
+}
+async function deleteSelectedTrekkers() {
+  const ids = [...document.querySelectorAll(".tksel:checked")].map(c => parseInt(c.value));
+  if (!ids.length) return;
+  if (!confirm(`Delete ${ids.length} trekker(s)?`)) return;
+  for (const id of ids) { try { await api(`/api/trekkers/${id}`, { method: "DELETE" }); } catch (e) {} }
+  toast(`Deleted ${ids.length}`); render();
+}
+function editTrekker(id) {
+  const t = (window.__trekkers || {})[id]; if (!t) return;
+  const box = $(`#tk-edit-${id}`);
+  if (box.innerHTML) { box.innerHTML = ""; return; }
+  const sel = (v, o) => v === o ? "selected" : "";
+  box.innerHTML = `<div class="card" style="margin:6px 0">
+    <div class="field-inline"><input id="et-name-${id}" value="${esc(t.name)}" placeholder="name">
+      <input id="et-age-${id}" value="${t.age ?? ""}" placeholder="age" inputmode="numeric" style="max-width:80px"></div>
+    <div class="field-inline">
+      <select id="et-gender-${id}"><option value="">Gender</option>
+        <option ${sel(t.gender, "Male")}>Male</option><option ${sel(t.gender, "Female")}>Female</option></select>
+      <input id="et-mobile-${id}" value="${esc(t.mobile_no || "")}" placeholder="mobile" inputmode="numeric"></div>
+    <div class="field-inline">
+      <select id="et-type-${id}"><option value="">ID type</option>
+        ${["pan","voter_id","dl","ration","passport"].map(x => `<option value="${x}" ${sel(t.govt_id_type, x)}>${x}</option>`).join("")}</select>
+      <input id="et-id-${id}" value="${esc(t.govt_id || "")}" placeholder="ID number"></div>
+    <div class="spacer"></div>
+    <button class="btn-primary btn-block btn-sm" onclick="saveTrekkerEdit(${id})">Save changes</button></div>`;
+}
+async function saveTrekkerEdit(id) {
+  const g = f => ($(`#et-${f}-${id}`) || {}).value;
+  const body = { name: g("name").trim(), age: parseInt(g("age")) || null,
+    gender: g("gender") || null, mobile_no: g("mobile").trim() || null,
+    govt_id_type: g("type") || null, govt_id: g("id").trim() || null };
+  try { await api(`/api/trekkers/${id}`, { method: "PATCH", body }); toast("Saved"); render(); }
+  catch (e) { toast(e.message); }
+}
 async function addTrekker() {
   const name = $("#tName").value.trim(); if (!name) return toast("Name required");
   const body = { name, age: parseInt($("#tAge").value) || null, gender: $("#tGender").value || null,
@@ -368,9 +437,11 @@ async function saveEvent() {
 
 // --- event detail + plan + start booking -----------------------------------
 route("event", async (id) => {
-  const [ev, plan, accounts] = await Promise.all([
+  const [ev, plan, accounts, treks, allTrekkers] = await Promise.all([
     api(`/api/events/${id}`), api(`/api/events/${id}/plan`), api("/api/accounts?status=available"),
+    api("/api/treks"), api("/api/trekkers"),
   ]);
+  window.__eventCtx = { ev, treks, allTrekkers };
   const chunkCards = plan.chunks.map((c, i) => {
     const accOpts = accounts.map(a => `<option value="${a.id}" ${c.suggested_account && a.id === c.suggested_account.id ? "selected" : ""}>${esc(a.email)}</option>`).join("");
     return `<div class="card" data-chunk="${i}">
@@ -383,9 +454,12 @@ route("event", async (id) => {
     </div>`;
   }).join("");
   setView(`
-    <div class="card"><div class="row between"><h2>${esc(ev.name)}</h2><span class="pill ${ev.status}">${ev.status}</span></div>
+    <div class="card"><div class="row between"><h2>${esc(ev.name)}</h2>
+      <div class="row" style="gap:6px"><span class="pill ${ev.status}">${ev.status}</span>
+        <button class="btn-sm" onclick="toggleEventEdit(${id})">Edit</button></div></div>
       <div class="muted">${esc(ev.trek_name)} · ${esc(ev.check_in)} · phone ${esc(ev.booking_phone)}</div>
       <div class="muted small spacer">${ev.booked}/${ev.total} booked · ${ev.remaining} to go · ${plan.available_accounts} accounts free</div>
+      <div id="event-edit"></div>
     </div>
     ${ev.remaining === 0 ? `<div class="card"><div class="banner ok">All trekkers booked 🎉</div></div>`
       : chunkCards || `<div class="card"><div class="muted">Nothing to book.</div></div>`}
@@ -396,6 +470,48 @@ route("event", async (id) => {
     if (s && !s.is_terminal && s.state !== "idle") startWizardPoll();
   } catch (e) {}
 });
+function toggleEventEdit(id) {
+  const box = $("#event-edit"); if (box.innerHTML) { box.innerHTML = ""; return; }
+  const { ev, treks, allTrekkers } = window.__eventCtx;
+  const inRoster = new Set(ev.roster.map(r => r.trekker_id));
+  const notInRoster = allTrekkers.filter(t => !inRoster.has(t.id));
+  const sel = (v, o) => v === o ? "selected" : "";
+  box.innerHTML = `<div class="card" style="margin-top:10px">
+    <label>Name</label><input id="ee-name" value="${esc(ev.name)}">
+    <label>Trek</label><select id="ee-trek">${treks.map(t => `<option value="${t.id}" ${sel(ev.trek_id, t.id)}>${esc(t.name)}</option>`).join("")}</select>
+    <label>Check-in (DD-MM-YYYY)</label><input id="ee-date" value="${esc(ev.check_in)}">
+    <label>Booking phone</label><input id="ee-phone" value="${esc(ev.booking_phone)}" inputmode="numeric">
+    <div class="spacer"></div><button class="btn-primary btn-block btn-sm" onclick="saveEventDetails(${id})">Save details</button>
+    <div class="spacer"></div><hr style="border-color:var(--border)">
+    <h2>Roster</h2>
+    ${ev.roster.map(r => `<div class="checkline">
+      <span style="flex:1">${esc(r.name)} ${r.booked ? '<span class="pill booked">booked</span>' : ""}</span>
+      ${r.booked ? "" : `<button class="btn-sm btn-danger" onclick="removeFromRoster(${id}, ${r.trekker_id})">Remove</button>`}</div>`).join("")}
+    ${notInRoster.length ? `<label>Add trekkers</label>
+      <div class="card" style="max-height:180px;overflow:auto;margin:0">
+        ${notInRoster.map(t => `<label class="checkline"><input type="checkbox" class="add-roster" value="${t.id}">
+          <span>${esc(t.name)} <span class="muted small">${esc(t.govt_id_type) || ""}</span></span></label>`).join("")}</div>
+      <div class="spacer"></div><button class="btn-block btn-sm" onclick="addToRoster(${id})">Add selected to roster</button>`
+      : `<div class="muted small">All trekkers are already in this event.</div>`}
+    </div>`;
+}
+async function saveEventDetails(id) {
+  const body = { name: $("#ee-name").value.trim(), trek_id: parseInt($("#ee-trek").value),
+    check_in: $("#ee-date").value.trim(), booking_phone: $("#ee-phone").value.trim() };
+  try { await api(`/api/events/${id}`, { method: "PATCH", body }); toast("Event updated"); render(); }
+  catch (e) { toast(e.message); }
+}
+async function addToRoster(id) {
+  const add = [...document.querySelectorAll(".add-roster:checked")].map(c => parseInt(c.value));
+  if (!add.length) return toast("Pick trekkers to add");
+  try { await api(`/api/events/${id}/roster`, { method: "PATCH", body: { add } }); toast("Added"); render(); }
+  catch (e) { toast(e.message); }
+}
+async function removeFromRoster(id, trekkerId) {
+  try { await api(`/api/events/${id}/roster`, { method: "PATCH", body: { remove: [trekkerId] } }); toast("Removed"); render(); }
+  catch (e) { toast(e.message); }
+}
+
 async function startBooking(eventId, chunkIdx) {
   const trekker_ids = [...document.querySelectorAll(`.ck-${chunkIdx}:checked`)].map(c => parseInt(c.value));
   if (!trekker_ids.length) return toast("Pick at least 1 trekker");
@@ -440,10 +556,14 @@ async function refreshWizard() {
         maxlength="6" placeholder="••••••">
       <div class="spacer"></div><button class="btn-primary btn-block" onclick="sendOtp()">Verify OTP</button>`;
   } else if (s.state === "awaiting_captcha") {
+    const guess = s.payload.captcha_guess || "";
     inner = `${s.payload.captcha_error ? `<div class="banner err">${esc(s.payload.captcha_error)}</div>` : ""}
-      <label>Enter the captcha</label>
+      <label>Type the captcha exactly as shown</label>
       <img class="captcha-img" src="/api/booking/captcha.png?n=${esc(s.payload.captcha_nonce)}" alt="captcha">
-      <input id="capBox" value="${esc(s.payload.captcha_guess || "")}" autocomplete="off" autocapitalize="characters">
+      <input id="capBox" value="" autocomplete="off" autocapitalize="characters" autocorrect="off"
+        spellcheck="false" placeholder="enter characters">
+      ${guess ? `<div class="muted small" style="margin-top:4px">OCR guess:
+        <b class="link" onclick="useGuess('${esc(guess)}')">${esc(guess)}</b> (tap to use — verify it first)</div>` : ""}
       <div class="row" style="gap:8px;margin-top:8px">
         <button class="btn-block" onclick="reloadCaptcha()">↻ New image</button>
         <button class="btn-primary btn-block" onclick="sendCaptcha()">Submit</button></div>`;
@@ -495,6 +615,8 @@ route("more", async () => {
           <input id="sPPass" value="${esc(s.proxy_pass || "")}" placeholder="pass"></div>
         <div class="field-inline"><input id="sPCountry" value="${esc(s.proxy_country || "IN")}" placeholder="country" style="max-width:90px">
           <input id="sPLife" value="${esc(s.proxy_session_lifetime || "30m")}" placeholder="lifetime"></div>
+        <label class="checkline"><input type="checkbox" id="sPSticky" ${s.proxy_use_sticky ? "checked" : ""}>
+          <span>Sticky session <span class="muted small">(off if your plan gives 407 — uses country-only + one pinned connection)</span></span></label>
       </div>
       <div class="spacer"></div>
       <div class="row" style="gap:8px"><button class="btn-primary btn-block" onclick="saveSettings()">Save</button>
@@ -527,17 +649,31 @@ async function saveSettings() {
   if ($("#sProxy").checked) Object.assign(body, {
     proxy_host: $("#sPHost").value.trim(), proxy_port: parseInt($("#sPPort").value) || 8080,
     proxy_user: $("#sPUser").value.trim(), proxy_pass: $("#sPPass").value,
-    proxy_country: $("#sPCountry").value.trim(), proxy_session_lifetime: $("#sPLife").value.trim() });
+    proxy_country: $("#sPCountry").value.trim(), proxy_session_lifetime: $("#sPLife").value.trim(),
+    proxy_use_sticky: $("#sPSticky").checked });
   await api("/api/settings", { method: "PUT", body }); toast("Saved");
 }
 async function testProxy() {
-  const el = $("#proxyResult"); el.innerHTML = `<div class="muted small spacer">Testing…</div>`;
-  try { const r = await api("/api/proxy/test", { method: "POST" });
+  const el = $("#proxyResult"); el.innerHTML = `<div class="muted small spacer">Testing (this can take ~20s)…</div>`;
+  try {
+    await api("/api/settings", { method: "PUT", body: proxyBody() }); // save first so test uses current fields
+    const r = await api("/api/proxy/test", { method: "POST" });
     const cls = r.ok ? "ok" : "err";
-    el.innerHTML = `<div class="banner ${cls} spacer">${r.ok ? "✓" : "✗"} ${esc(r.mode)} · IP ${esc(r.ip || "?")} (${esc(r.country || "?")})
-      ${r.enabled ? (r.sticky_verified ? " · sticky ✓" : " · sticky not confirmed (fallback)") : ""}
-      ${r.error ? "· " + esc(r.error) : ""}</div>`;
+    const probes = (r.probes || []).map(p =>
+      `<div class="small">${p.ok ? "✓" : "✗"} <b>${esc(p.variant)}</b>: ${p.ok ? "IP " + esc(p.ip) + " (" + esc(p.country) + ")" : esc(p.error || "failed")}</div>`).join("");
+    el.innerHTML = `<div class="banner ${cls} spacer">${r.ok ? "✓ Connected" : "✗ Could not connect"}
+      ${r.ok ? "· using <b>" + esc(r.mode) + "</b> format · IP " + esc(r.ip) + " (" + esc(r.country) + ")" : ""}
+      ${r.error ? "<br>" + esc(r.error) : ""}</div>${probes ? `<div class="card" style="margin:6px 0">${probes}</div>` : ""}`;
   } catch (e) { el.innerHTML = `<div class="banner err spacer">${esc(e.message)}</div>`; }
+}
+function proxyBody() {
+  const body = { proxy_enabled: $("#sProxy").checked };
+  if ($("#sProxy").checked) Object.assign(body, {
+    proxy_host: $("#sPHost").value.trim(), proxy_port: parseInt($("#sPPort").value) || 8080,
+    proxy_user: $("#sPUser").value.trim(), proxy_pass: $("#sPPass").value,
+    proxy_country: $("#sPCountry").value.trim(), proxy_session_lifetime: $("#sPLife").value.trim(),
+    proxy_use_sticky: $("#sPSticky").checked });
+  return body;
 }
 async function addTrek() {
   const body = { name: $("#trName").value.trim(), portal_trek_id: parseInt($("#trPid").value),
@@ -559,8 +695,40 @@ Object.assign(window, { go, addAccount, resetAccount, delAccount, addTrekker, de
   parsePaste, uploadFile, importSeed, commitPreview, saveEvent, startBooking, sendOtp,
   sendCaptcha, reloadCaptcha, openPay, paidDone, cancelBooking, saveSettings, testProxy,
   addTrek, delTrek, importSeedTreks, render, setRange, histSearch, histDay, calMove,
-  refreshTickets, ticketSearch, openCancel, doCancel });
+  refreshTickets, ticketSearch, openCancel, doCancel,
+  updateDelSel, deleteSelectedTrekkers, editTrekker, saveTrekkerEdit,
+  editAccount, saveAccountEdit, toggleEventEdit, saveEventDetails, addToRoster, removeFromRoster });
+
+function useGuess(g) { const b = $("#capBox"); if (b) { b.value = g; b.focus(); } }
+
+// --- theme + mode badge ----------------------------------------------------
+function applyTheme(theme) {
+  document.documentElement.setAttribute("data-theme", theme);
+  const btn = $("#themeBtn"); if (btn) btn.textContent = theme === "dark" ? "☀️" : "🌙";
+}
+function toggleTheme() {
+  const cur = document.documentElement.getAttribute("data-theme") || _systemTheme();
+  const next = cur === "dark" ? "light" : "dark";
+  localStorage.setItem("bb_theme", next); applyTheme(next);
+}
+function _systemTheme() {
+  return window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+}
+function initTheme() { applyTheme(localStorage.getItem("bb_theme") || _systemTheme()); }
+async function initMode() {
+  try {
+    const h = await api("/api/health");
+    const b = $("#modeBadge"); if (!b) return;
+    b.classList.remove("hidden");
+    b.textContent = h.dry_run ? "DEMO" : "LIVE";
+    b.classList.toggle("demo", h.dry_run);
+    b.classList.toggle("live", !h.dry_run);
+  } catch (e) {}
+}
 
 // boot
+Object.assign(window, { useGuess, toggleTheme });
+initTheme();
+initMode();
 if (!location.hash) location.hash = "#dashboard";
 render();

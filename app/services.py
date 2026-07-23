@@ -70,4 +70,5 @@ def proxy_config_from_settings(settings: AppSetting) -> ProxyConfig:
         country=settings.proxy_country or "IN",
         session_lifetime=settings.proxy_session_lifetime or "30m",
         require_country=settings.require_country or "IN",
+        use_sticky=bool(settings.proxy_use_sticky),
     )
