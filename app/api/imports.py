@@ -7,6 +7,7 @@ from sqlmodel import Session
 from app import config
 from app.db import get_session
 from app.import_ import commit as commit_svc
+from app.import_.ai_parser import ai_available, parse_trekkers_ai
 from app.import_.parser import parse_trekkers_text
 from app.import_.sheets import read_accounts, read_trekkers
 from app.migration import parse_accounts, parse_treks, parse_trekkers
@@ -23,10 +24,27 @@ router = APIRouter(prefix="/api/import", tags=["import"])
 
 
 @router.post("/parse-text", response_model=PreviewResponse)
-def parse_text(req: ParseTextRequest) -> PreviewResponse:
-    """Smart-paste lane: parse a messy blob into trekker rows for review."""
+def parse_text(req: ParseTextRequest,
+               engine: str = Query("auto", pattern="^(auto|ai|local)$")) -> PreviewResponse:
+    """Smart-paste lane: parse a messy blob into trekker rows for review.
+
+    engine=auto (default): use Claude if ANTHROPIC_API_KEY is set, else local
+    heuristic. engine=local forces the offline parser. On any AI error, falls
+    back to local and notes it.
+    """
+    if engine in ("auto", "ai") and ai_available():
+        try:
+            rows = parse_trekkers_ai(req.text)
+            return PreviewResponse(kind="trekkers", rows=rows, count=len(rows), engine="ai")
+        except Exception as e:
+            if engine == "ai":  # explicit AI request -> surface the failure reason
+                rows = parse_trekkers_text(req.text)
+                return PreviewResponse(kind="trekkers", rows=rows, count=len(rows),
+                                       engine="local", note=f"AI parse failed, used local: {e}")
+            # auto: silently fall back to local
     rows = parse_trekkers_text(req.text)
-    return PreviewResponse(kind="trekkers", rows=rows, count=len(rows))
+    note = None if ai_available() or engine == "local" else "Set ANTHROPIC_API_KEY for AI parsing."
+    return PreviewResponse(kind="trekkers", rows=rows, count=len(rows), engine="local", note=note)
 
 
 @router.post("/upload", response_model=PreviewResponse)

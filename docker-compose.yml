@@ -9,6 +9,8 @@ services:
       # Override in a .env file or your host's secrets manager.
       BB_DATA_DIR: /data
       BB_SECRET_KEY: ${BB_SECRET_KEY:-change-me-in-production}
+      # Optional: set to enable AI smart-paste parsing (offline heuristic used if unset).
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
     volumes:
       - bookingbot-data:/data
     restart: unless-stopped

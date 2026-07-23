@@ -42,6 +42,8 @@ class PreviewResponse(BaseModel):
     kind: str
     rows: List[dict]
     count: int
+    engine: Optional[str] = None  # "ai" | "local" | None (for non-parse imports)
+    note: Optional[str] = None
 
 
 class CommitAccountsRequest(BaseModel):

@@ -339,7 +339,10 @@ route("import", async (kind) => {
         <label>Smart paste — WhatsApp / list / table / OCR text</label>
         <textarea id="pasteBox" placeholder="Paste anything. e.g.&#10;Ravi Kumar 30 M 9876543210 ABCDE1234F&#10;Priya S, Female, 25, 9123456780, voter ABC1234567"></textarea>
         <div class="spacer"></div>
-        <button class="btn-accent btn-block" onclick="parsePaste()">Parse & preview</button>
+        <div class="row" style="gap:8px">
+          <button id="parseBtn" class="btn-accent btn-block" onclick="parsePaste()">Parse & preview</button>
+          <button class="btn-block btn-sm" onclick="parsePaste('local')">Local only</button></div>
+        <div class="muted small spacer">Uses AI when ANTHROPIC_API_KEY is set (falls back to the offline parser).</div>
         <div class="spacer"></div>` : ""}
       <label>Or upload a file (${kind === "accounts" ? "xlsx / csv / yaml" : "xlsx / csv / yaml"})</label>
       <input type="file" id="fileIn" accept=".xlsx,.csv,.yaml,.yml,.tsv">
@@ -350,10 +353,15 @@ route("import", async (kind) => {
     </div>
     <div id="previewArea"></div>`);
 });
-async function parsePaste() {
+async function parsePaste(engine) {
   const text = $("#pasteBox").value; if (!text.trim()) return toast("Nothing to parse");
-  const res = await api("/api/import/parse-text", { method: "POST", body: { text } });
-  renderPreview("trekkers", res.rows);
+  const q = engine ? `?engine=${engine}` : "";
+  const btn = $("#parseBtn"); if (btn) { btn.disabled = true; btn.textContent = "Parsing…"; }
+  try {
+    const res = await api(`/api/import/parse-text${q}`, { method: "POST", body: { text } });
+    renderPreview("trekkers", res.rows, { engine: res.engine, note: res.note });
+  } catch (e) { toast(e.message); }
+  finally { if (btn) { btn.disabled = false; btn.textContent = "Parse & preview"; } }
 }
 async function uploadFile(kind) {
   const f = $("#fileIn").files[0]; if (!f) return toast("Choose a file");
@@ -366,10 +374,13 @@ async function importSeed(kind) {
   try { const res = await api(`/api/import/from-seed?kind=${kind}`, { method: "POST" });
     renderPreview(kind, res.rows); } catch (e) { toast(e.message); }
 }
-function renderPreview(kind, rows) {
+function renderPreview(kind, rows, meta = {}) {
   window.__preview = { kind, rows };
   const area = $("#previewArea");
-  if (!rows.length) { area.innerHTML = `<div class="card"><div class="muted">No rows found.</div></div>`; return; }
+  const engineTag = meta.engine
+    ? `<span class="pill ${meta.engine === "ai" ? "open" : "available"}">${meta.engine === "ai" ? "🤖 AI" : "local"} parse</span>` : "";
+  const noteTag = meta.note ? `<div class="banner warn small">${esc(meta.note)}</div>` : "";
+  if (!rows.length) { area.innerHTML = `<div class="card">${noteTag}<div class="muted">No rows found.</div></div>`; return; }
   const body = rows.map((r, i) => {
     if (kind === "accounts")
       return `<div class="list-item"><div><b>${esc(r.email)}</b><div class="muted small">${r.password ? "pw set" : "shared pw"} · ${esc(r.status || "available")}</div></div></div>`;
@@ -378,7 +389,7 @@ function renderPreview(kind, rows) {
       <div class="muted small">${r.age ?? "?"} · ${esc(r.gender) || "?"} · ${esc(r.govt_id_type) || "no id"} ${esc(r.govt_id) || ""} · ${esc(r.mobile_no) || "no mobile"}</div></div>
       ${bad ? `<span class="pill booked">${bad} to check</span>` : `<span class="pill available">ok</span>`}</div>`;
   }).join("");
-  area.innerHTML = `<div class="card"><div class="row between"><h2>Preview (${rows.length})</h2>
+  area.innerHTML = `<div class="card">${noteTag}<div class="row between"><h2>Preview (${rows.length}) ${engineTag}</h2>
     <button class="btn-primary btn-sm" onclick="commitPreview()">Save all</button></div>${body}
     <div class="muted small spacer">Review flagged rows; edit later under ${kind}.</div></div>`;
 }
