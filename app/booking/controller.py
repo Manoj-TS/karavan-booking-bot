@@ -39,6 +39,38 @@ logger = logging.getLogger("booking.controller")
 OTP_MAX_RETRIES = 3
 CAPTCHA_MAX_RETRIES = 6
 PAUSE_TIMEOUT = 600.0  # 10 min per human step
+HEARTBEAT_SECS = 8.0   # keep the pinned proxy connection (exit IP) warm during pauses
+
+
+class _Heartbeat:
+    """Pings the portal on the booking's session every few seconds so the single
+    pinned connection — and therefore the proxy exit IP — doesn't idle-close
+    while the user is entering the OTP / captcha. Without true sticky sessions
+    this is what prevents the portal's 'does not match current session' error."""
+
+    def __init__(self, client, interval: float = HEARTBEAT_SECS):
+        self._client = client
+        self._interval = interval
+        self._stop = threading.Event()
+        self._thread: Optional[threading.Thread] = None
+
+    def start(self) -> None:
+        if config.DRY_RUN or not hasattr(self._client, "keep_alive"):
+            return
+        self._thread = threading.Thread(target=self._run, daemon=True, name="hb")
+        self._thread.start()
+
+    def _run(self) -> None:
+        while not self._stop.wait(self._interval):
+            try:
+                self._client.keep_alive()
+            except Exception:
+                pass
+
+    def stop(self) -> None:
+        self._stop.set()
+        if self._thread:
+            self._thread.join(timeout=12)  # let any in-flight ping finish first
 
 
 class BookingBusyError(Exception):
@@ -126,6 +158,15 @@ class BookingController:
         with self._lock:
             if self._session:
                 self._session.payload.update(kv)
+
+    def _await(self, bridge: PromptBridge, kind: str, timeout: float, client):
+        """Block for a human input while a heartbeat keeps the proxy IP warm."""
+        hb = _Heartbeat(client)
+        hb.start()
+        try:
+            return bridge.await_input(kind, timeout=timeout)
+        finally:
+            hb.stop()  # joins in-flight ping before the worker makes its next request
 
     # --- the worker ---------------------------------------------------------
 
@@ -215,15 +256,21 @@ class BookingController:
             raise RuntimeError(f"Could not send OTP: {masked}")
         self._payload(masked_mobile=masked, booking_phone=booking_phone)
 
-        # 5. OTP entry (pause) + verify, with retries
+        # 5. OTP entry (pause) + verify, with retries. Heartbeat holds the exit IP
+        #    across the wait (the proxy isn't sticky).
         for attempt in range(1, OTP_MAX_RETRIES + 1):
             self._set(BookingState.AWAITING_OTP)
             self._msg(f"Enter the OTP sent to {masked or booking_phone}.")
-            otp = bridge.await_input("otp", timeout=PAUSE_TIMEOUT)
+            otp = self._await(bridge, "otp", PAUSE_TIMEOUT, client)
             self._set(BookingState.VERIFYING_OTP)
             ok, msg = client.verify_otp(booking_phone, str(otp).strip())
             if ok:
                 break
+            if "does not match current session" in msg.lower():
+                raise RuntimeError(
+                    "The exit IP changed during the OTP wait — the proxy isn't "
+                    "sticky, so the booking session was lost. This is not a wrong "
+                    "OTP. Start the booking again to get a fresh IP.")
             if attempt == OTP_MAX_RETRIES:
                 raise RuntimeError(f"OTP verification failed: {msg}")
             self._payload(otp_error=msg)
@@ -241,7 +288,7 @@ class BookingController:
                 captcha_nonce=uuid.uuid4().hex[:8],
             )
             self._msg("Enter the captcha shown.")
-            value = bridge.await_input("captcha", timeout=PAUSE_TIMEOUT)
+            value = self._await(bridge, "captcha", PAUSE_TIMEOUT, client)
             if value == "__reload__":
                 continue
             self._set(BookingState.SUBMITTING)

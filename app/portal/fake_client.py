@@ -28,6 +28,9 @@ class FakeTrekPortalClient:
     def ensure_logged_in(self, email: str, password: str) -> bool:
         return True
 
+    def keep_alive(self) -> bool:
+        return True
+
     def get_treks(self, district_id: int) -> List[Dict]:
         return [{"id": 113, "name": "Netravathi"}]
 

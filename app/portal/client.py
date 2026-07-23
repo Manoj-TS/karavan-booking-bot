@@ -100,6 +100,17 @@ class TrekPortalClient:
             return resp
         return resp
 
+    def keep_alive(self) -> bool:
+        """Lightweight request to keep the single pinned connection (and thus the
+        proxy exit IP) from idling closed during a human pause. Reuses the pooled
+        connection; the response is fully drained."""
+        try:
+            r = self.session.get(self._url("/home"), timeout=10, allow_redirects=False)
+            _ = r.content
+            return True
+        except Exception:
+            return False
+
     def _is_session_live(self) -> bool:
         try:
             r = self.session.get(self._url("/home"), timeout=10, allow_redirects=True)
