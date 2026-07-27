@@ -246,7 +246,15 @@ class BookingController:
             self._set(BookingState.LOGGING_IN, exit_ip=exit_ip, proxy_mode=proxy_mode)
             self._msg(f"Logging in as {account.email}...")
             if not client.ensure_logged_in(account.email, password):
-                raise RuntimeError("Login failed — check the account's password.")
+                conn = getattr(client, "last_conn_error", None)
+                if conn:
+                    raise RuntimeError(
+                        "Could not connect through the proxy (the gateway returned "
+                        f"an error: {conn[:120]}). This is a proxy problem, not your "
+                        "password. The proxy is unreliable right now — retry, or turn "
+                        "the proxy OFF (More → Settings) and use an Indian VPN.")
+                raise RuntimeError("Login failed — the portal rejected the credentials. "
+                                   "Check the account's password.")
             self._set(BookingState.SELECTING_SLOT)
             self._msg("Selecting the timeslot...")
             client.get_treks(trek.district_id)

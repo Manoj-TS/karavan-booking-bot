@@ -56,6 +56,7 @@ class TrekPortalClient:
         self.ocr_api_key = ocr_api_key
         self.csrf_token: Optional[str] = None
         self.booking_data: Dict = {}
+        self.last_conn_error: Optional[str] = None  # set on proxy/network login failure
 
     # --- URL / CSRF / POST helpers ------------------------------------------
 
@@ -198,11 +199,18 @@ class TrekPortalClient:
                 return True
             logger.error(f"Login failed for {email} | URL: {r.url}")
             return False
+        except (requests.exceptions.ProxyError, requests.exceptions.ConnectionError,
+                requests.exceptions.Timeout) as e:
+            # Proxy/network failure — NOT a bad password. Surface it truthfully.
+            self.last_conn_error = str(e)
+            logger.error(f"Login connection error (proxy/network): {e}")
+            return False
         except Exception as e:
             logger.error(f"Login error: {e}")
             return False
 
     def ensure_logged_in(self, email: str, password: str) -> bool:
+        self.last_conn_error = None
         if self.load_session() and self._is_session_live():
             logger.info(f"Reusing cached session for {email}")
             return True
