@@ -91,3 +91,13 @@ def pay() -> HTMLResponse:
     if not html:
         raise HTTPException(404, "No payment page available.")
     return HTMLResponse(content=html)
+
+
+@router.get("/portal-response")
+def portal_response() -> HTMLResponse:
+    """The portal's actual page from a failed submit — so you can see the real
+    reason (e.g. 'already booked on this IP')."""
+    html = controller.portal_response()
+    if not html:
+        raise HTTPException(404, "No portal response saved.")
+    return HTMLResponse(content=html)

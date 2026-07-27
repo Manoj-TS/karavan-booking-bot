@@ -57,6 +57,7 @@ class TrekPortalClient:
         self.csrf_token: Optional[str] = None
         self.booking_data: Dict = {}
         self.last_conn_error: Optional[str] = None  # set on proxy/network login failure
+        self.last_submit_html: Optional[str] = None  # last /summaryblade response, for inspection
 
     # --- URL / CSRF / POST helpers ------------------------------------------
 
@@ -360,16 +361,27 @@ class TrekPortalClient:
 
             r = self._post("/summaryblade", post_data, allow_redirects=False)
 
-            # A wrong captcha redirects (Laravel back()) to the previous url.
-            if r.status_code in (301, 302, 303, 307, 308):
-                return SubmitResult(False, "captcha_rejected",
-                                    message="Captcha rejected — the characters did not match.")
-
+            # A PNG/binary body is almost always a wrong captcha.
             ctype = (r.headers.get("Content-Type") or "").lower()
             if r.content[:4] in (b"\x89PNG", b"\xff\xd8\xff\xe0") or \
                (ctype and "html" not in ctype and "text" not in ctype):
+                self.last_submit_html = "(binary/image response)"
                 return SubmitResult(False, "captcha_rejected",
-                                    message="Portal returned an image — almost always a wrong captcha.")
+                                    message="Portal returned an image — usually a wrong captcha.")
+
+            # On a redirect (Laravel back()), FOLLOW it and read the real flash
+            # message — a redirect is NOT always a captcha error (could be
+            # 'already booked on this IP', session lost, etc.).
+            if r.status_code in (301, 302, 303, 307, 308):
+                loc = r.headers.get("Location", "")
+                try:
+                    r = self.session.get(self._url(loc), timeout=12)
+                    _ = r.content
+                except Exception:
+                    return SubmitResult(False, "error",
+                                        message="Submit redirected but the follow-up failed.")
+
+            self.last_submit_html = r.text  # saved by the controller for inspection
 
             parsed = payment_mod.parse_surepay_form(r.text)
             if parsed:
@@ -382,21 +394,50 @@ class TrekPortalClient:
                     message="Payment form ready.",
                 )
 
-            page_text = BeautifulSoup(r.text, "html.parser").get_text(" ", strip=True).lower()
-            if "captcha" in page_text and any(w in page_text for w in
-                                              ("invalid", "incorrect", "does not match", "mismatch")):
-                return SubmitResult(False, "captcha_rejected", message="Captcha rejected.")
-            if any(w in page_text for w in ("not available for selected date",
-                                            "not available for the selected",
-                                            "requested no. of tickets are not available")):
+            soup = BeautifulSoup(r.text, "html.parser")
+            flash = self._extract_flash(soup)          # the portal's own message
+            page_text = soup.get_text(" ", strip=True)
+            low = (flash or page_text).lower()
+
+            # Already-booked / one-per-IP-or-account / limit -> a HARD, clear stop.
+            if any(w in low for w in (
+                    "already booked", "already registered", "already have a booking",
+                    "one booking", "only one", "per day", "per ip", "same ip",
+                    "cannot book", "limit", "maximum", "exceeded", "not allowed")):
+                return SubmitResult(False, "rejected",
+                                    message="Portal rejected the booking: "
+                                            f"\"{(flash or page_text)[:220]}\". "
+                                            "This IP/account may already have a booking today "
+                                            "(one booking per IP and per account per day).")
+            if any(w in low for w in ("not available for selected date",
+                                      "not available for the selected",
+                                      "requested no. of tickets are not available",
+                                      "sold out", "no slots")):
                 return SubmitResult(False, "sold_out",
                                     message="Sold out: not enough seats for that date/slot/party size.")
-            snippet = page_text[:280]
+            if "captcha" in low and any(w in low for w in
+                                        ("invalid", "incorrect", "does not match", "mismatch", "wrong")):
+                return SubmitResult(False, "captcha_rejected",
+                                    message="Captcha rejected — read the image carefully and retry.")
+            # Unknown — surface the portal's actual words rather than guessing captcha.
+            snippet = (flash or page_text)[:280] or "(no message on the page)"
             return SubmitResult(False, "error",
-                                message=f"No payment form returned. Portal said: \"{snippet}\"")
+                                message=f"Booking not accepted. Portal said: \"{snippet}\"")
         except Exception as e:
             logger.error(f"submit_trekker_details error: {e}")
             return SubmitResult(False, "error", message=str(e))
+
+    @staticmethod
+    def _extract_flash(soup) -> Optional[str]:
+        """Pull the portal's flash/alert message from a page, if any."""
+        for sel in (".alert", ".alert-danger", ".invalid-feedback", ".text-danger",
+                    "[role=alert]", ".toast-message", ".error", ".message"):
+            el = soup.select_one(sel)
+            if el:
+                txt = el.get_text(" ", strip=True)
+                if txt:
+                    return txt
+        return None
 
     # --- Payment handoff page ------------------------------------------------
 

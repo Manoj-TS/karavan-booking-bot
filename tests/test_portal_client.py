@@ -28,10 +28,12 @@ class StubResp:
 
 
 class StubSession:
-    """Returns queued responses for POST; records posted data."""
+    """Returns queued responses for POST; get() returns a configurable page
+    (used when submit follows a redirect)."""
 
-    def __init__(self, responses):
+    def __init__(self, responses, follow_html="<html></html>"):
         self._responses = list(responses)
+        self._follow_html = follow_html
         self.posted = []
 
     def post(self, url, data=None, timeout=None, **kwargs):
@@ -39,7 +41,7 @@ class StubSession:
         return self._responses.pop(0)
 
     def get(self, url, timeout=None, **kwargs):
-        return StubResp("<html></html>")
+        return StubResp(self._follow_html)
 
 
 def _client(session):
@@ -83,9 +85,20 @@ def test_submit_paywall_success():
 
 
 def test_submit_captcha_rejected_on_redirect():
-    session = StubSession([StubResp("", status=302, headers={"Location": "/captcha"})])
+    # 302 -> follow -> the flash page says captcha invalid -> captcha_rejected
+    session = StubSession([StubResp("", status=302, headers={"Location": "/summary"})],
+                          follow_html='<div class="alert">Captcha is invalid, please retry</div>')
     res = _client(session).submit_trekker_details(TREKKERS, "01-08-2026", 45, "BAD")
     assert not res.ok and res.status == "captcha_rejected"
+
+
+def test_submit_already_booked_on_redirect():
+    # 302 -> follow -> 'already booked' -> a HARD 'rejected', not a captcha loop
+    session = StubSession([StubResp("", status=302, headers={"Location": "/summary"})],
+                          follow_html='<div class="alert-danger">You have already booked for this date on this IP.</div>')
+    res = _client(session).submit_trekker_details(TREKKERS, "01-08-2026", 45, "GOOD")
+    assert not res.ok and res.status == "rejected"
+    assert "already booked" in res.message.lower()
 
 
 def test_submit_sold_out():

@@ -589,7 +589,9 @@ async function refreshWizard() {
       <button class="btn-primary btn-block" onclick="render()">Done</button>`;
   } else if (s.state === "failed" || s.state === "cancelled") {
     inner = `<div class="banner err">${esc(s.error || s.state)}</div>
-      <button class="btn-block" onclick="render()">Close</button>`;
+      <div class="row" style="gap:8px">
+        <button class="btn-block btn-sm" onclick="window.open('/api/booking/portal-response','_blank')">View portal's response</button>
+        <button class="btn-block" onclick="render()">Close</button></div>`;
   }
   const showCancel = !s.is_terminal;
   w.innerHTML = `<div class="card"><div class="steps">${bars}</div>${inner}

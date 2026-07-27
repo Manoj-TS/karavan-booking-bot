@@ -89,6 +89,7 @@ class BookingController:
         self._thread: Optional[threading.Thread] = None
         self._captcha_bytes: Optional[bytes] = None
         self._pay_html: Optional[str] = None
+        self._portal_response: Optional[str] = None  # last failed /summaryblade page
 
     # --- public API ---------------------------------------------------------
 
@@ -141,6 +142,20 @@ class BookingController:
 
     def payment_html(self) -> Optional[str]:
         return self._pay_html
+
+    def portal_response(self) -> Optional[str]:
+        return self._portal_response
+
+    def _save_portal_response(self, html: Optional[str]) -> None:
+        self._portal_response = html
+        if not html or not self._session:
+            return
+        try:
+            d = config.ARTIFACTS_DIR / self._session.booking_id
+            d.mkdir(parents=True, exist_ok=True)
+            (d / "portal_response.html").write_text(html, encoding="utf-8")
+        except Exception:
+            pass
 
     # --- state helpers ------------------------------------------------------
 
@@ -338,6 +353,9 @@ class BookingController:
                 if attempt == CAPTCHA_MAX_RETRIES:
                     raise RuntimeError("Too many captcha attempts.")
                 continue
+            # Non-captcha rejection (already-booked / sold-out / unknown): save the
+            # portal's actual response so the user can inspect exactly why.
+            self._save_portal_response(getattr(client, "last_submit_html", None))
             raise RuntimeError(submit.message)
 
         # 7. Payment handoff (pause)
