@@ -670,10 +670,15 @@ async function testProxy() {
     await api("/api/settings", { method: "PUT", body: proxyBody() }); // save first so test uses current fields
     const r = await api("/api/proxy/test", { method: "POST" });
     const cls = r.ok ? "ok" : "err";
-    const probes = (r.probes || []).map(p =>
-      `<div class="small">${p.ok ? "✓" : "✗"} <b>${esc(p.variant)}</b>: ${p.ok ? "IP " + esc(p.ip) + " (" + esc(p.country) + ")" : esc(p.error || "failed")}</div>`).join("");
+    const probes = (r.probes || []).map(p => {
+      const hold = p.stable === true ? " · held ✓" : p.stable === false ? " · did NOT hold ✗" : "";
+      return `<div class="small">${p.ok ? "✓" : "✗"} <b>${esc(p.variant)}</b>: ${p.ok ? "IP " + esc(p.ip) + " (" + esc(p.country) + ")" + hold : esc(p.error || "failed")}</div>`;
+    }).join("");
+    const stickyMsg = r.sticky_verified
+      ? "· <b>sticky confirmed</b> — IP holds across the OTP wait"
+      : (r.mode === "country" ? "· country-only (no sticky; IP may change mid-booking)" : "");
     el.innerHTML = `<div class="banner ${cls} spacer">${r.ok ? "✓ Connected" : "✗ Could not connect"}
-      ${r.ok ? "· using <b>" + esc(r.mode) + "</b> format · IP " + esc(r.ip) + " (" + esc(r.country) + ")" : ""}
+      ${r.ok ? "· best format <b>" + esc(r.mode) + "</b> · IP " + esc(r.ip) + " (" + esc(r.country) + ") " + stickyMsg : ""}
       ${r.error ? "<br>" + esc(r.error) : ""}</div>${probes ? `<div class="card" style="margin:6px 0">${probes}</div>` : ""}`;
   } catch (e) { el.innerHTML = `<div class="banner err spacer">${esc(e.message)}</div>`; }
 }

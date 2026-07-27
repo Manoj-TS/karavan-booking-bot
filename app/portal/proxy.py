@@ -14,6 +14,7 @@ password, underscore-separated:
 from __future__ import annotations
 
 import logging
+import re
 import secrets
 import time
 from dataclasses import dataclass
@@ -61,22 +62,49 @@ class Acquisition:
     error: Optional[str] = None
 
 
-def build_proxy_url(cfg: ProxyConfig, session_id: Optional[str]) -> str:
-    """Build the sticky proxy URL. session_id=None -> rotating (no stickiness)."""
+# Sticky format variants to try, richest first. Proxy-Cheap's `thehub` appends
+# targeting params to the PASSWORD; the exact sticky spelling varies by plan, so
+# we probe several. `lifetime` is integer MINUTES (not "30m" — that 500s).
+STICKY_VARIANTS = ("session_lifetime", "session", "sessid", "country", "bare")
+
+
+def _lifetime_min(cfg: ProxyConfig) -> str:
+    digits = re.sub(r"\D", "", cfg.session_lifetime or "")
+    return digits or "10"
+
+
+def build_proxy_url(cfg: ProxyConfig, session_id: Optional[str],
+                    variant: str = "session_lifetime") -> str:
+    """Build a proxy URL for a given credential `variant`.
+
+    - bare:             user:pass                       (no targeting)
+    - country:          user:pass_country-IN            (rotating, India)
+    - session:          ..._session-<id>                (sticky, no lifetime)
+    - session_lifetime: ..._session-<id>_lifetime-<min> (sticky, integer minutes)
+    - sessid:           ..._sessionid-<id>              (alt sticky spelling)
+    """
     parts = [cfg.password]
-    if cfg.country:
+    if variant != "bare" and cfg.country:
         parts.append(f"country-{cfg.country}")
-    if session_id:
-        parts.append(f"session-{session_id}")
-        if cfg.session_lifetime:
-            parts.append(f"lifetime-{cfg.session_lifetime}")
+    sid = session_id or ""
+    if variant in ("session", "session_lifetime") and sid:
+        parts.append(f"session-{sid}")
+        if variant == "session_lifetime":
+            parts.append(f"lifetime-{_lifetime_min(cfg)}")
+    elif variant == "sessid" and sid:
+        parts.append(f"sessionid-{sid}")
     pwd = "_".join(p for p in parts if p)
     return f"http://{cfg.user}:{pwd}@{cfg.host}:{cfg.port}"
 
 
 def _pin_adapter(session: requests.Session) -> None:
-    """One blocking connection so the (sticky) exit IP never varies."""
-    adapter = HTTPAdapter(pool_connections=1, pool_maxsize=1, pool_block=True)
+    """Hold ONE connection per host so the rotating proxy's exit IP stays put for
+    the whole booking. pool_maxsize=1 + pool_block=True => a single connection to
+    the portal, reused for every request. pool_connections=10 keeps that portal
+    connection cached even when another host (the IP-check endpoint) is touched —
+    with pool_connections=1 the portal pool got evicted and the next portal
+    request opened a fresh connection with a NEW IP, which is what broke OTP."""
+    adapter = HTTPAdapter(pool_connections=10, pool_maxsize=1, pool_block=True)
     session.mount("https://", adapter)
     session.mount("http://", adapter)
 
@@ -136,15 +164,16 @@ class ProxyManager:
         self.cfg = cfg
         self.is_ip_on_cooldown = is_ip_on_cooldown
 
-    # --- sticky self-test ---------------------------------------------------
+    # --- IP-stability check (the real test for sticky) ----------------------
 
-    def _sticky_selftest(self, session: requests.Session, expected_ip: str) -> bool:
-        """Force a couple of fresh connections; sticky means the IP holds."""
-        for _ in range(2):
-            ip, _ = check_exit_ip(session, close=True)
-            if not ip or ip != expected_ip:
-                return False
-        return True
+    def _ip_holds_across_gap(self, session: requests.Session, expected_ip: str,
+                             gap: float = 3.0) -> bool:
+        """Does the exit IP survive an idle gap + a fresh connection? A genuine
+        sticky session maps session-id -> IP at the gateway, so it holds even
+        after the connection is reaped — exactly what the OTP wait needs."""
+        time.sleep(gap)
+        ip, _ = check_exit_ip(session, close=True)
+        return bool(ip and ip == expected_ip)
 
     # --- acquisition --------------------------------------------------------
 
@@ -154,80 +183,84 @@ class ProxyManager:
             ip, country = check_exit_ip(session)
             return Acquisition(session, ip, country, mode="direct")
 
-        last_cooldown = False
-        last_err = None
-        sticky_disabled = False  # auto-dropped if the gateway rejects the session token
-        for attempt in range(1, MAX_IP_ATTEMPTS + 1):
-            want_sticky = self.cfg.use_sticky and not sticky_disabled
-            sid = secrets.token_hex(4) if want_sticky else None
-            url = build_proxy_url(self.cfg, sid)
-            session = _new_session(url, pin=True)
-            ip, country, err = check_exit_ip_verbose(session)
-            if not ip:
-                last_err = err
-                logger.warning(f"attempt {attempt}: no IP ({err}); retrying")
-                _close(session)
-                if err and "407" in err:  # auth won't fix itself by retrying
-                    break
-                # Sticky token rejected by the gateway (e.g. 500 tunnel error) ->
-                # drop sticky for the rest of this run and continue country-only.
-                if want_sticky and err and any(k in err for k in (
-                        "Tunnel connection failed", "500", "Unable to connect to proxy",
-                        "ProxyError")):
-                    sticky_disabled = True
-                    logger.warning("Sticky session rejected by the proxy gateway; "
-                                   "falling back to country-only + single pinned connection.")
-                    continue
-                time.sleep(1.0)
-                continue
-            if self.cfg.require_country and country != self.cfg.require_country:
-                logger.warning(f"attempt {attempt}: IP {ip} is {country!r}, "
-                               f"need {self.cfg.require_country!r}; re-rolling")
-                _close(session)
-                time.sleep(0.5)
-                continue
-            if self.is_ip_on_cooldown(ip):
-                logger.warning(f"attempt {attempt}: IP {ip} already used today; re-rolling")
-                last_cooldown = True
-                _close(session)
-                time.sleep(0.3)
-                continue
-            # Sticky self-test only when sticky is actually in use this run.
-            sticky = self._sticky_selftest(session, ip) if want_sticky else False
-            mode = "proxy" if sticky else "fallback"
-            return Acquisition(session, ip, country, mode=mode, sticky_verified=sticky)
+        # Try sticky spellings first (richest -> simplest); a variant that
+        # authenticates AND holds its IP across a gap is true stickiness. Fall
+        # back to country-only (single pinned connection) if none hold.
+        variants = (list(STICKY_VARIANTS[:3]) if self.cfg.use_sticky else []) + ["country"]
+        last_err, last_cooldown = None, False
 
-        return Acquisition(None, None, None, mode="proxy",
-                           cooldown_conflict=last_cooldown,
-                           error=(last_err or f"Could not get an Indian IP after "
-                                  f"{MAX_IP_ATTEMPTS} tries.") + " (Check credentials/balance, "
-                                  "try turning sticky off, or disable the proxy.)")
+        for variant in variants:
+            sticky_variant = variant in ("session_lifetime", "session", "sessid")
+            for _ in range(3):  # re-roll for wrong-country / cooldown within a variant
+                sid = secrets.token_hex(4)
+                session = _new_session(build_proxy_url(self.cfg, sid, variant), pin=True)
+                ip, country, err = check_exit_ip_verbose(session)
+                if not ip:
+                    last_err = err
+                    _close(session)
+                    if err and "407" in err:
+                        return Acquisition(None, None, None, mode="proxy",
+                                           error="Proxy auth failed (407) — check credentials.")
+                    break  # this variant is rejected (e.g. 500) -> try the next one
+                if self.cfg.require_country and country != self.cfg.require_country:
+                    _close(session)
+                    time.sleep(0.4)
+                    continue
+                if self.is_ip_on_cooldown(ip):
+                    last_cooldown = True
+                    _close(session)
+                    time.sleep(0.3)
+                    continue
+                if sticky_variant:
+                    if self._ip_holds_across_gap(session, ip):
+                        logger.info(f"Sticky IP confirmed via '{variant}': {ip}")
+                        return Acquisition(session, ip, country, mode="proxy",
+                                           sticky_verified=True)
+                    _close(session)  # authenticated but not sticky -> next variant
+                    break
+                return Acquisition(session, ip, country, mode="fallback",
+                                   sticky_verified=False)  # country-only, best-effort
+
+        return Acquisition(None, None, None, mode="proxy", cooldown_conflict=last_cooldown,
+                           error=(last_err or "Could not get an Indian IP.")
+                           + " (Check credentials/balance or disable the proxy.)")
 
     def _probe(self, variant: str) -> dict:
-        """Try one credential format and report what happened."""
-        if variant == "bare":
-            url = f"http://{self.cfg.user}:{self.cfg.password}@{self.cfg.host}:{self.cfg.port}"
-        elif variant == "country":
-            url = build_proxy_url(ProxyConfig(**{**self.cfg.__dict__, "use_sticky": False}), None)
-        else:  # sticky
-            url = build_proxy_url(self.cfg, secrets.token_hex(4))
-        session = _new_session(url, pin=True)
+        """Try one credential format; for sticky variants, also test IP hold."""
+        sid = secrets.token_hex(4)
+        session = _new_session(build_proxy_url(self.cfg, sid, variant), pin=True)
         ip, country, err = check_exit_ip_verbose(session)
+        stable = None
+        if ip and variant in ("session_lifetime", "session", "sessid"):
+            stable = self._ip_holds_across_gap(session, ip, gap=3.0)
         _close(session)
         return {"variant": variant, "ok": ip is not None, "ip": ip,
-                "country": country, "error": err}
+                "country": country, "stable": stable, "error": err}
 
     def test(self) -> dict:
-        """Staged diagnostic for /api/proxy/test: which credential format works?"""
+        """Diagnostic for /api/proxy/test: which credential format authenticates,
+        and does any give a *stable* Indian IP (true sticky)?"""
         if not self.cfg.enabled:
             acq = self.acquire()
             _close(acq.session)
             return {"enabled": False, "ok": acq.ip is not None, "ip": acq.ip,
                     "country": acq.country, "mode": "direct", "sticky_verified": False,
                     "probes": [], "error": acq.error}
-        probes = [self._probe("bare"), self._probe("country"), self._probe("sticky")]
-        # Prefer the richest format that authenticates: sticky > country > bare.
-        best = next((p for p in reversed(probes) if p["ok"]), None)
+
+        probes = [self._probe(v) for v in
+                  ("bare", "country", "session", "session_lifetime", "sessid")]
+
+        def score(p: dict) -> int:
+            if not p["ok"]:
+                return -1
+            s = 1 + (2 if p["country"] == self.cfg.require_country else 0)
+            if p["variant"] in ("session_lifetime", "session", "sessid") and p["stable"]:
+                s += 20  # a stable sticky IP wins decisively
+            elif p["variant"] == "country":
+                s += 3
+            return s
+
+        best = max(probes, key=score) if any(p["ok"] for p in probes) else None
         error = None if best else (next((p["error"] for p in probes if p["error"]), None)
                                    or "All credential formats failed.")
         return {
@@ -236,7 +269,7 @@ class ProxyManager:
             "ip": best["ip"] if best else None,
             "country": best["country"] if best else None,
             "mode": (best["variant"] if best else "proxy"),
-            "sticky_verified": bool(best and best["variant"] == "sticky"),
+            "sticky_verified": bool(best and best.get("stable")),
             "probes": probes,
             "error": error,
         }

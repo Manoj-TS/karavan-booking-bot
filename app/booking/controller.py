@@ -39,7 +39,7 @@ logger = logging.getLogger("booking.controller")
 OTP_MAX_RETRIES = 3
 CAPTCHA_MAX_RETRIES = 6
 PAUSE_TIMEOUT = 600.0  # 10 min per human step
-HEARTBEAT_SECS = 8.0   # keep the pinned proxy connection (exit IP) warm during pauses
+HEARTBEAT_SECS = 5.0   # keep the pinned proxy connection (exit IP) warm during pauses
 
 
 class _Heartbeat:
@@ -61,11 +61,15 @@ class _Heartbeat:
         self._thread.start()
 
     def _run(self) -> None:
-        while not self._stop.wait(self._interval):
+        # Ping immediately (no initial gap), then every interval, so the pinned
+        # connection is never idle long enough for the proxy/portal to drop it.
+        while True:
             try:
                 self._client.keep_alive()
             except Exception:
                 pass
+            if self._stop.wait(self._interval):
+                break
 
     def stop(self) -> None:
         self._stop.set()
@@ -216,64 +220,85 @@ class BookingController:
         booking_phone = params.get("booking_phone") or event.booking_phone
         password = account.password or settings.shared_default_password or ""
 
-        self._set(BookingState.ACQUIRING_PROXY, account_email=account.email,
-                  trek_name=trek.name)
-        self._msg("Acquiring a fresh IP...")
+        # Steps 1-4 as a re-runnable prime: acquire IP -> client -> login ->
+        #    discovery -> select slot -> generate OTP. Re-run on mid-OTP IP loss.
+        st = {"client": None, "session": None, "exit_ip": None, "mode": "direct"}
 
-        # 1. Proxy / IP
-        portal_session = None
-        exit_ip = None
-        proxy_mode = "direct"
-        if not config.DRY_RUN:
-            cfg = proxy_config_from_settings(settings)
-            mgr = ProxyManager(cfg, is_ip_on_cooldown=lambda ip: is_ip_on_cooldown(
-                db, ip, settings.ip_cooldown_days))
-            acq = mgr.acquire()
-            if acq.error or acq.session is None:
-                raise RuntimeError(acq.error or "Could not acquire an IP.")
-            portal_session, exit_ip, proxy_mode = acq.session, acq.ip, acq.mode
-        self._set(BookingState.LOGGING_IN, exit_ip=exit_ip, proxy_mode=proxy_mode)
-        self._msg(f"Logging in as {account.email}...")
+        def prime() -> str:
+            if st["session"] is not None:
+                try:
+                    st["session"].close()
+                except Exception:
+                    pass
+            self._set(BookingState.ACQUIRING_PROXY, account_email=account.email,
+                      trek_name=trek.name)
+            self._msg("Acquiring a fresh IP...")
+            portal_session, exit_ip, proxy_mode = None, None, "direct"
+            if not config.DRY_RUN:
+                cfg = proxy_config_from_settings(settings)
+                mgr = ProxyManager(cfg, is_ip_on_cooldown=lambda ip: is_ip_on_cooldown(
+                    db, ip, settings.ip_cooldown_days))
+                acq = mgr.acquire()
+                if acq.error or acq.session is None:
+                    raise RuntimeError(acq.error or "Could not acquire an IP.")
+                portal_session, exit_ip, proxy_mode = acq.session, acq.ip, acq.mode
+            client = self._make_client(portal_session, config.BASE_URL, account.email, settings)
+            self._set(BookingState.LOGGING_IN, exit_ip=exit_ip, proxy_mode=proxy_mode)
+            self._msg(f"Logging in as {account.email}...")
+            if not client.ensure_logged_in(account.email, password):
+                raise RuntimeError("Login failed — check the account's password.")
+            self._set(BookingState.SELECTING_SLOT)
+            self._msg("Selecting the timeslot...")
+            client.get_treks(trek.district_id)
+            client.get_blocked_dates(trek.district_id, trek.portal_trek_id)
+            if not client.select_timeslot(trek.portal_trek_id, trek.timeslot_mapping_id):
+                raise RuntimeError("Could not select the timeslot.")
+            self._set(BookingState.GENERATING_OTP)
+            ok, masked = client.generate_otp(booking_phone)
+            if not ok:
+                raise RuntimeError(f"Could not send OTP: {masked}")
+            self._payload(masked_mobile=masked, booking_phone=booking_phone)
+            st.update(client=client, session=portal_session, exit_ip=exit_ip, mode=proxy_mode)
+            return masked
 
-        client = self._make_client(portal_session, config.BASE_URL, account.email, settings)
+        masked = prime()
 
-        # 2. Login
-        if not client.ensure_logged_in(account.email, password):
-            raise RuntimeError("Login failed — check the account's password.")
-
-        # 3. Discovery + timeslot
-        self._set(BookingState.SELECTING_SLOT)
-        self._msg("Selecting the timeslot...")
-        client.get_treks(trek.district_id)
-        client.get_blocked_dates(trek.district_id, trek.portal_trek_id)
-        if not client.select_timeslot(trek.portal_trek_id, trek.timeslot_mapping_id):
-            raise RuntimeError("Could not select the timeslot.")
-
-        # 4. OTP generation
-        self._set(BookingState.GENERATING_OTP)
-        ok, masked = client.generate_otp(booking_phone)
-        if not ok:
-            raise RuntimeError(f"Could not send OTP: {masked}")
-        self._payload(masked_mobile=masked, booking_phone=booking_phone)
-
-        # 5. OTP entry (pause) + verify, with retries. Heartbeat holds the exit IP
-        #    across the wait (the proxy isn't sticky).
-        for attempt in range(1, OTP_MAX_RETRIES + 1):
-            self._set(BookingState.AWAITING_OTP)
-            self._msg(f"Enter the OTP sent to {masked or booking_phone}.")
-            otp = self._await(bridge, "otp", PAUSE_TIMEOUT, client)
-            self._set(BookingState.VERIFYING_OTP)
-            ok, msg = client.verify_otp(booking_phone, str(otp).strip())
-            if ok:
+        # 5. OTP entry (pause) + verify. Heartbeat holds the exit IP across the
+        #    wait; if it still slips, self-heal by re-priming a fresh IP + OTP.
+        reprimes = 0
+        while True:
+            client = st["client"]
+            got_otp = False
+            for attempt in range(1, OTP_MAX_RETRIES + 1):
+                self._set(BookingState.AWAITING_OTP)
+                self._msg(f"Enter the OTP sent to {masked or booking_phone}.")
+                otp = self._await(bridge, "otp", PAUSE_TIMEOUT, client)
+                self._set(BookingState.VERIFYING_OTP)
+                ok, msg = client.verify_otp(booking_phone, str(otp).strip())
+                if ok:
+                    got_otp = True
+                    break
+                if "does not match current session" in msg.lower():
+                    break  # IP lost -> re-prime below
+                if attempt == OTP_MAX_RETRIES:
+                    raise RuntimeError(f"OTP verification failed: {msg}")
+                self._payload(otp_error=msg)
+            if got_otp:
                 break
-            if "does not match current session" in msg.lower():
+            reprimes += 1
+            if reprimes > 2:
                 raise RuntimeError(
-                    "The exit IP changed during the OTP wait — the proxy isn't "
-                    "sticky, so the booking session was lost. This is not a wrong "
-                    "OTP. Start the booking again to get a fresh IP.")
-            if attempt == OTP_MAX_RETRIES:
-                raise RuntimeError(f"OTP verification failed: {msg}")
-            self._payload(otp_error=msg)
+                    "The exit IP kept changing across the OTP wait even after "
+                    "auto-retries — this Proxy-Cheap plan has no sticky sessions. "
+                    "Turn the proxy OFF (More → Settings) and connect an Indian "
+                    "VPN for a stable IP, then book.")
+            self._msg("IP changed during the wait — grabbing a fresh IP and "
+                      "resending the OTP; enter the NEW code.")
+            self._payload(otp_error="IP changed — a new OTP was sent. Enter the new code.")
+            masked = prime()
+
+        client = st["client"]
+        exit_ip = st["exit_ip"]
 
         # 6. Captcha loop (pause) + submit
         submit = None
