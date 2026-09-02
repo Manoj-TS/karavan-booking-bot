@@ -1,11 +1,14 @@
 """FastAPI application entrypoint."""
 from __future__ import annotations
 
+import base64
+import binascii
+import secrets
 from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 from app import config
@@ -28,6 +31,32 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title=config.APP_NAME, version=config.APP_VERSION, lifespan=lifespan)
+
+
+def _unauthorized() -> Response:
+    return Response(status_code=401, headers={"WWW-Authenticate": 'Basic realm="Karavan"'})
+
+
+@app.middleware("http")
+async def _basic_auth(request, call_next):
+    # Shared-login gate for hosted deployments. Off by default (local dev,
+    # and any deployment that doesn't set BB_AUTH_USER/BB_AUTH_PASS) so
+    # nothing changes for the existing local-first workflow. The health
+    # check stays open for the hosting platform's own liveness probes.
+    if config.AUTH_USER and request.url.path != "/api/health":
+        header = request.headers.get("authorization", "")
+        ok = False
+        if header.startswith("Basic "):
+            try:
+                raw = base64.b64decode(header[6:]).decode("utf-8")
+                user, _, pw = raw.partition(":")
+                ok = (secrets.compare_digest(user, config.AUTH_USER)
+                      and secrets.compare_digest(pw, config.AUTH_PASS))
+            except (binascii.Error, UnicodeDecodeError, ValueError):
+                ok = False
+        if not ok:
+            return _unauthorized()
+    return await call_next(request)
 
 
 @app.middleware("http")

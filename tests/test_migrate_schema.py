@@ -16,14 +16,14 @@ def test_add_missing_column(tmp_path, monkeypatch):
     db.init_db()
     with db.engine.begin() as conn:
         cols = {c["name"] for c in inspect(db.engine).get_columns("app_setting")}
-        assert "proxy_use_sticky" in cols
-        # Rebuild app_setting without proxy_use_sticky to mimic a pre-upgrade DB.
-        conn.execute(text("ALTER TABLE app_setting DROP COLUMN proxy_use_sticky"))
+        assert "account_cooldown_days" in cols
+        # Rebuild app_setting without account_cooldown_days to mimic a pre-upgrade DB.
+        conn.execute(text("ALTER TABLE app_setting DROP COLUMN account_cooldown_days"))
 
     cols_after_drop = {c["name"] for c in inspect(db.engine).get_columns("app_setting")}
-    assert "proxy_use_sticky" not in cols_after_drop
+    assert "account_cooldown_days" not in cols_after_drop
 
     # Re-running init_db must re-add it (additive migration), no crash.
     db.init_db()
     cols_final = {c["name"] for c in inspect(db.engine).get_columns("app_setting")}
-    assert "proxy_use_sticky" in cols_final
+    assert "account_cooldown_days" in cols_final

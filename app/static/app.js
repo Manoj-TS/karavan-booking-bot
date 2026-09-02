@@ -536,7 +536,7 @@ async function startBooking(eventId, chunkIdx) {
 }
 
 // --- booking wizard (drives the pausable state machine) --------------------
-const STATE_STEP = { acquiring_proxy: 0, logging_in: 0, selecting_slot: 0, generating_otp: 1,
+const STATE_STEP = { starting: 0, logging_in: 0, selecting_slot: 0, generating_otp: 1,
   awaiting_otp: 1, verifying_otp: 1, awaiting_captcha: 2, submitting: 2, awaiting_payment: 3,
   polling_tickets: 3, completed: 4, failed: 4, cancelled: 4 };
 let _wizSig = null;
@@ -619,22 +619,8 @@ route("more", async () => {
       <input id="sPhone" inputmode="numeric" value="${esc(s.booking_phone_number || "")}">
       <label>Shared default password</label>
       <input id="sPw" value="${esc(s.shared_default_password || "")}">
-      <label class="checkline" style="margin-top:12px"><input type="checkbox" id="sProxy" ${s.proxy_enabled ? "checked" : ""}>
-        <span>Use proxy (off = your normal network / VPN)</span></label>
-      <div id="proxyFields" class="${s.proxy_enabled ? "" : "hidden"}">
-        <div class="field-inline"><input id="sPHost" value="${esc(s.proxy_host || "")}" placeholder="host">
-          <input id="sPPort" value="${esc(s.proxy_port || "")}" placeholder="port" style="max-width:90px"></div>
-        <div class="field-inline"><input id="sPUser" value="${esc(s.proxy_user || "")}" placeholder="user">
-          <input id="sPPass" value="${esc(s.proxy_pass || "")}" placeholder="pass"></div>
-        <div class="field-inline"><input id="sPCountry" value="${esc(s.proxy_country || "IN")}" placeholder="country" style="max-width:90px">
-          <input id="sPLife" value="${esc(s.proxy_session_lifetime || "30m")}" placeholder="lifetime"></div>
-        <label class="checkline"><input type="checkbox" id="sPSticky" ${s.proxy_use_sticky ? "checked" : ""}>
-          <span>Sticky session <span class="muted small">(off if your plan gives 407 — uses country-only + one pinned connection)</span></span></label>
-      </div>
       <div class="spacer"></div>
-      <div class="row" style="gap:8px"><button class="btn-primary btn-block" onclick="saveSettings()">Save</button>
-        <button class="btn-block" onclick="testProxy()">Test proxy</button></div>
-      <div id="proxyResult"></div>
+      <button class="btn-primary btn-block" onclick="saveSettings()">Save</button>
     </div>
     <div class="card"><div class="row between"><h2>Treks</h2></div>
       <label>Add trek preset</label>
@@ -653,45 +639,10 @@ route("more", async () => {
     </div>
     <div class="card"><button class="btn-block" onclick="go('import','trekkers')">Import trekkers</button>
       <div class="spacer"></div><button class="btn-block" onclick="go('import','accounts')">Import accounts</button></div>`);
-  $("#sProxy").addEventListener("change", (e) =>
-    $("#proxyFields").classList.toggle("hidden", !e.target.checked));
 });
 async function saveSettings() {
-  const body = { booking_phone_number: $("#sPhone").value.trim(), shared_default_password: $("#sPw").value,
-    proxy_enabled: $("#sProxy").checked };
-  if ($("#sProxy").checked) Object.assign(body, {
-    proxy_host: $("#sPHost").value.trim(), proxy_port: parseInt($("#sPPort").value) || 8080,
-    proxy_user: $("#sPUser").value.trim(), proxy_pass: $("#sPPass").value,
-    proxy_country: $("#sPCountry").value.trim(), proxy_session_lifetime: $("#sPLife").value.trim(),
-    proxy_use_sticky: $("#sPSticky").checked });
+  const body = { booking_phone_number: $("#sPhone").value.trim(), shared_default_password: $("#sPw").value };
   await api("/api/settings", { method: "PUT", body }); toast("Saved");
-}
-async function testProxy() {
-  const el = $("#proxyResult"); el.innerHTML = `<div class="muted small spacer">Testing (this can take ~20s)…</div>`;
-  try {
-    await api("/api/settings", { method: "PUT", body: proxyBody() }); // save first so test uses current fields
-    const r = await api("/api/proxy/test", { method: "POST" });
-    const cls = r.ok ? "ok" : "err";
-    const probes = (r.probes || []).map(p => {
-      const hold = p.stable === true ? " · held ✓" : p.stable === false ? " · did NOT hold ✗" : "";
-      return `<div class="small">${p.ok ? "✓" : "✗"} <b>${esc(p.variant)}</b>: ${p.ok ? "IP " + esc(p.ip) + " (" + esc(p.country) + ")" + hold : esc(p.error || "failed")}</div>`;
-    }).join("");
-    const stickyMsg = r.sticky_verified
-      ? "· <b>sticky confirmed</b> — IP holds across the OTP wait"
-      : (r.mode === "country" ? "· country-only (no sticky; IP may change mid-booking)" : "");
-    el.innerHTML = `<div class="banner ${cls} spacer">${r.ok ? "✓ Connected" : "✗ Could not connect"}
-      ${r.ok ? "· best format <b>" + esc(r.mode) + "</b> · IP " + esc(r.ip) + " (" + esc(r.country) + ") " + stickyMsg : ""}
-      ${r.error ? "<br>" + esc(r.error) : ""}</div>${probes ? `<div class="card" style="margin:6px 0">${probes}</div>` : ""}`;
-  } catch (e) { el.innerHTML = `<div class="banner err spacer">${esc(e.message)}</div>`; }
-}
-function proxyBody() {
-  const body = { proxy_enabled: $("#sProxy").checked };
-  if ($("#sProxy").checked) Object.assign(body, {
-    proxy_host: $("#sPHost").value.trim(), proxy_port: parseInt($("#sPPort").value) || 8080,
-    proxy_user: $("#sPUser").value.trim(), proxy_pass: $("#sPPass").value,
-    proxy_country: $("#sPCountry").value.trim(), proxy_session_lifetime: $("#sPLife").value.trim(),
-    proxy_use_sticky: $("#sPSticky").checked });
-  return body;
 }
 async function addTrek() {
   const body = { name: $("#trName").value.trim(), portal_trek_id: parseInt($("#trPid").value),
@@ -711,7 +662,7 @@ async function importSeedTreks() {
 // expose handlers used inline
 Object.assign(window, { go, addAccount, resetAccount, delAccount, addTrekker, delTrekker,
   parsePaste, uploadFile, importSeed, commitPreview, saveEvent, startBooking, sendOtp,
-  sendCaptcha, reloadCaptcha, openPay, paidDone, cancelBooking, saveSettings, testProxy,
+  sendCaptcha, reloadCaptcha, openPay, paidDone, cancelBooking, saveSettings,
   addTrek, delTrek, importSeedTreks, render, setRange, histSearch, histDay, calMove,
   refreshTickets, ticketSearch, openCancel, doCancel,
   updateDelSel, deleteSelectedTrekkers, editTrekker, saveTrekkerEdit,

@@ -39,7 +39,6 @@ class Account(SQLModel, table=True):
     status: str = Field(default="available", index=True)
     booked_date: Optional[date] = None
     booked_trek: Optional[str] = None
-    last_used_ip: Optional[str] = None
     last_used_date: Optional[date] = Field(default=None, index=True)
     notes: Optional[str] = None
     created_at: datetime = Field(default_factory=_utcnow)
@@ -115,7 +114,6 @@ class Booking(SQLModel, table=True):
     check_in: Optional[str] = None
     trekker_ids: List[int] = Field(default_factory=list, sa_column=Column(JSON))
     state: str = Field(default="idle", index=True)
-    exit_ip: Optional[str] = None
     order_id: Optional[str] = None
     amount: Optional[str] = None
     portal_booking_id: Optional[str] = None
@@ -149,18 +147,6 @@ class Ticket(SQLModel, table=True):
     updated_at: datetime = Field(default_factory=_utcnow)
 
 
-class UsedIp(SQLModel, table=True):
-    """Ledger of exit IPs used for a booking, to avoid same-day reuse."""
-
-    __tablename__ = "used_ip"
-
-    id: Optional[int] = Field(default=None, primary_key=True)
-    ip: str = Field(index=True)
-    used_date: date = Field(index=True)
-    account_email: Optional[str] = None
-    booking_id: Optional[int] = None
-
-
 class AppSetting(SQLModel, table=True):
     """Singleton settings row (id == 1)."""
 
@@ -173,17 +159,6 @@ class AppSetting(SQLModel, table=True):
     captcha_mode: str = Field(default="manual")  # manual | auto
     ocr_space_api_key: Optional[str] = None
 
-    proxy_enabled: bool = Field(default=False)
-    proxy_host: Optional[str] = "thehub.proxy-cheap.com"
-    proxy_port: Optional[int] = 8080
-    proxy_user: Optional[str] = None
-    proxy_pass: Optional[str] = None
-    proxy_country: str = Field(default="IN")
-    proxy_session_lifetime: str = Field(default="30m")
-    proxy_use_sticky: bool = Field(default=True)
-
-    require_country: str = Field(default="IN")
-    ip_cooldown_days: int = Field(default=1)      # today-only == 1
     account_cooldown_days: int = Field(default=1)  # today-only == 1
 
     updated_at: datetime = Field(default_factory=_utcnow)

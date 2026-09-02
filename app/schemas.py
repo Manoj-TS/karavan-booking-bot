@@ -72,16 +72,6 @@ class SettingsRead(BaseModel):
     shared_default_password: Optional[str] = None
     captcha_mode: str = "manual"
     ocr_space_api_key: Optional[str] = None
-    proxy_enabled: bool = False
-    proxy_host: Optional[str] = None
-    proxy_port: Optional[int] = None
-    proxy_user: Optional[str] = None
-    proxy_pass: Optional[str] = None
-    proxy_country: str = "IN"
-    proxy_session_lifetime: str = "30m"
-    proxy_use_sticky: bool = True
-    require_country: str = "IN"
-    ip_cooldown_days: int = 1
     account_cooldown_days: int = 1
 
 
@@ -90,25 +80,4 @@ class SettingsUpdate(BaseModel):
     shared_default_password: Optional[str] = None
     captcha_mode: Optional[str] = None
     ocr_space_api_key: Optional[str] = None
-    proxy_enabled: Optional[bool] = None
-    proxy_host: Optional[str] = None
-    proxy_port: Optional[int] = None
-    proxy_user: Optional[str] = None
-    proxy_pass: Optional[str] = None
-    proxy_country: Optional[str] = None
-    proxy_session_lifetime: Optional[str] = None
-    proxy_use_sticky: Optional[bool] = None
-    require_country: Optional[str] = None
-    ip_cooldown_days: Optional[int] = None
     account_cooldown_days: Optional[int] = None
-
-
-class ProxyTestResult(BaseModel):
-    enabled: bool
-    ok: bool
-    ip: Optional[str] = None
-    country: Optional[str] = None
-    mode: str = "direct"
-    sticky_verified: bool = False
-    probes: List[dict] = []
-    error: Optional[str] = None

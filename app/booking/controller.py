@@ -12,6 +12,7 @@ import threading
 import uuid
 from typing import Any, Dict, Optional
 
+import requests
 from sqlmodel import Session, select
 
 from app import config
@@ -26,55 +27,23 @@ from app.db import engine, get_settings
 from app.models import Account, Booking, Event, EventTrekker, Trek, Trekker
 from app.portal.client import TrekPortalClient
 from app.portal.fake_client import FakeTrekPortalClient
-from app.portal.proxy import ProxyManager
-from app.services import (
-    is_ip_on_cooldown,
-    mark_account_used,
-    proxy_config_from_settings,
-    record_used_ip,
-)
+from app.services import mark_account_used
 
 logger = logging.getLogger("booking.controller")
 
 OTP_MAX_RETRIES = 3
 CAPTCHA_MAX_RETRIES = 6
 PAUSE_TIMEOUT = 600.0  # 10 min per human step
-HEARTBEAT_SECS = 5.0   # keep the pinned proxy connection (exit IP) warm during pauses
+
+_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+       "(KHTML, like Gecko) Chrome/124.0 Safari/537.36")
 
 
-class _Heartbeat:
-    """Pings the portal on the booking's session every few seconds so the single
-    pinned connection — and therefore the proxy exit IP — doesn't idle-close
-    while the user is entering the OTP / captcha. Without true sticky sessions
-    this is what prevents the portal's 'does not match current session' error."""
-
-    def __init__(self, client, interval: float = HEARTBEAT_SECS):
-        self._client = client
-        self._interval = interval
-        self._stop = threading.Event()
-        self._thread: Optional[threading.Thread] = None
-
-    def start(self) -> None:
-        if config.DRY_RUN or not hasattr(self._client, "keep_alive"):
-            return
-        self._thread = threading.Thread(target=self._run, daemon=True, name="hb")
-        self._thread.start()
-
-    def _run(self) -> None:
-        # Ping immediately (no initial gap), then every interval, so the pinned
-        # connection is never idle long enough for the proxy/portal to drop it.
-        while True:
-            try:
-                self._client.keep_alive()
-            except Exception:
-                pass
-            if self._stop.wait(self._interval):
-                break
-
-    def stop(self) -> None:
-        self._stop.set()
-        if self._thread:
-            self._thread.join(timeout=12)  # let any in-flight ping finish first
+def _new_session() -> requests.Session:
+    s = requests.Session()
+    s.headers.update({"User-Agent": _UA, "Accept-Language": "en-US,en;q=0.9",
+                      "Connection": "keep-alive"})
+    return s
 
 
 class BookingBusyError(Exception):
@@ -100,7 +69,7 @@ class BookingController:
             booking_id = uuid.uuid4().hex[:12]
             self._session = BookingSession(
                 booking_id=booking_id,
-                state=BookingState.ACQUIRING_PROXY,
+                state=BookingState.STARTING,
                 account_id=params.get("account_id"),
                 event_id=params.get("event_id"),
                 trekker_ids=list(params.get("trekker_ids") or []),
@@ -157,6 +126,16 @@ class BookingController:
         except Exception:
             pass
 
+    def _save_artifact(self, filename: str, html: Optional[str]) -> None:
+        if not html or not self._session:
+            return
+        try:
+            d = config.ARTIFACTS_DIR / self._session.booking_id
+            d.mkdir(parents=True, exist_ok=True)
+            (d / filename).write_text(html, encoding="utf-8")
+        except Exception:
+            pass
+
     # --- state helpers ------------------------------------------------------
 
     def _set(self, state: str, **fields) -> None:
@@ -177,15 +156,6 @@ class BookingController:
         with self._lock:
             if self._session:
                 self._session.payload.update(kv)
-
-    def _await(self, bridge: PromptBridge, kind: str, timeout: float, client):
-        """Block for a human input while a heartbeat keeps the proxy IP warm."""
-        hb = _Heartbeat(client)
-        hb.start()
-        try:
-            return bridge.await_input(kind, timeout=timeout)
-        finally:
-            hb.stop()  # joins in-flight ping before the worker makes its next request
 
     # --- the worker ---------------------------------------------------------
 
@@ -235,9 +205,10 @@ class BookingController:
         booking_phone = params.get("booking_phone") or event.booking_phone
         password = account.password or settings.shared_default_password or ""
 
-        # Steps 1-4 as a re-runnable prime: acquire IP -> client -> login ->
-        #    discovery -> select slot -> generate OTP. Re-run on mid-OTP IP loss.
-        st = {"client": None, "session": None, "exit_ip": None, "mode": "direct"}
+        # Steps 1-4 as a re-runnable prime: new session -> client -> login ->
+        #    discovery -> select slot -> generate OTP. Re-run if the portal
+        #    invalidates the session mid-OTP-wait.
+        st = {"client": None, "session": None}
 
         def prime() -> str:
             if st["session"] is not None:
@@ -245,49 +216,56 @@ class BookingController:
                     st["session"].close()
                 except Exception:
                     pass
-            self._set(BookingState.ACQUIRING_PROXY, account_email=account.email,
+            self._set(BookingState.STARTING, account_email=account.email,
                       trek_name=trek.name)
-            self._msg("Acquiring a fresh IP...")
-            portal_session, exit_ip, proxy_mode = None, None, "direct"
-            if not config.DRY_RUN:
-                cfg = proxy_config_from_settings(settings)
-                mgr = ProxyManager(cfg, is_ip_on_cooldown=lambda ip: is_ip_on_cooldown(
-                    db, ip, settings.ip_cooldown_days))
-                acq = mgr.acquire()
-                if acq.error or acq.session is None:
-                    raise RuntimeError(acq.error or "Could not acquire an IP.")
-                portal_session, exit_ip, proxy_mode = acq.session, acq.ip, acq.mode
+            self._msg("Starting a fresh session...")
+            portal_session = None if config.DRY_RUN else _new_session()
             client = self._make_client(portal_session, config.BASE_URL, account.email, settings)
-            self._set(BookingState.LOGGING_IN, exit_ip=exit_ip, proxy_mode=proxy_mode)
+            self._set(BookingState.LOGGING_IN)
             self._msg(f"Logging in as {account.email}...")
             if not client.ensure_logged_in(account.email, password):
                 conn = getattr(client, "last_conn_error", None)
                 if conn:
                     raise RuntimeError(
-                        "Could not connect through the proxy (the gateway returned "
-                        f"an error: {conn[:120]}). This is a proxy problem, not your "
-                        "password. The proxy is unreliable right now — retry, or turn "
-                        "the proxy OFF (More → Settings) and use an Indian VPN.")
+                        f"Could not connect to the portal ({conn[:120]}). "
+                        "This looks like a network problem, not your password — "
+                        "check your connection and retry.")
                 raise RuntimeError("Login failed — the portal rejected the credentials. "
                                    "Check the account's password.")
             self._set(BookingState.SELECTING_SLOT)
             self._msg("Selecting the timeslot...")
             client.get_treks(trek.district_id)
-            client.get_blocked_dates(trek.district_id, trek.portal_trek_id)
-            if not client.select_timeslot(trek.portal_trek_id, trek.timeslot_mapping_id):
-                raise RuntimeError("Could not select the timeslot.")
+            blocked = client.get_blocked_dates(trek.district_id, trek.portal_trek_id)
+            blocked_set = {str(b).strip() for b in (blocked or [])}
+            if event.check_in in blocked_set:
+                raise RuntimeError(
+                    f"{event.check_in} is blocked for this trek on the portal — "
+                    "pick a different date for this event before retrying.")
+            # Must happen before select_timeslot: the real front-end always renders
+            # the availability/search page for this trek+date first — it's what
+            # registers the date against the session server-side.
+            client.check_availability(trek.district_id, trek.portal_trek_id, event.check_in)
+            self._save_artifact("availability_response.html",
+                                getattr(client, "last_availability_response", None))
+            slot_ok = client.select_timeslot(trek.portal_trek_id, trek.timeslot_mapping_id)
+            self._save_artifact("getTimeslot_response.txt",
+                                getattr(client, "last_timeslot_response", None))
+            if not slot_ok:
+                raise RuntimeError("Could not select the timeslot (no form_token from the "
+                                   "portal — see getTimeslot_response.txt in this booking's "
+                                   "artifacts).")
             self._set(BookingState.GENERATING_OTP)
             ok, masked = client.generate_otp(booking_phone)
             if not ok:
                 raise RuntimeError(f"Could not send OTP: {masked}")
             self._payload(masked_mobile=masked, booking_phone=booking_phone)
-            st.update(client=client, session=portal_session, exit_ip=exit_ip, mode=proxy_mode)
+            st.update(client=client, session=portal_session)
             return masked
 
         masked = prime()
 
-        # 5. OTP entry (pause) + verify. Heartbeat holds the exit IP across the
-        #    wait; if it still slips, self-heal by re-priming a fresh IP + OTP.
+        # 5. OTP entry (pause) + verify. If the portal reports the session as
+        #    stale, self-heal by re-priming a fresh session + OTP.
         reprimes = 0
         while True:
             client = st["client"]
@@ -295,14 +273,14 @@ class BookingController:
             for attempt in range(1, OTP_MAX_RETRIES + 1):
                 self._set(BookingState.AWAITING_OTP)
                 self._msg(f"Enter the OTP sent to {masked or booking_phone}.")
-                otp = self._await(bridge, "otp", PAUSE_TIMEOUT, client)
+                otp = bridge.await_input("otp", timeout=PAUSE_TIMEOUT)
                 self._set(BookingState.VERIFYING_OTP)
                 ok, msg = client.verify_otp(booking_phone, str(otp).strip())
                 if ok:
                     got_otp = True
                     break
                 if "does not match current session" in msg.lower():
-                    break  # IP lost -> re-prime below
+                    break  # session went stale -> re-prime below
                 if attempt == OTP_MAX_RETRIES:
                     raise RuntimeError(f"OTP verification failed: {msg}")
                 self._payload(otp_error=msg)
@@ -311,17 +289,14 @@ class BookingController:
             reprimes += 1
             if reprimes > 2:
                 raise RuntimeError(
-                    "The exit IP kept changing across the OTP wait even after "
-                    "auto-retries — this Proxy-Cheap plan has no sticky sessions. "
-                    "Turn the proxy OFF (More → Settings) and connect an Indian "
-                    "VPN for a stable IP, then book.")
-            self._msg("IP changed during the wait — grabbing a fresh IP and "
-                      "resending the OTP; enter the NEW code.")
-            self._payload(otp_error="IP changed — a new OTP was sent. Enter the new code.")
+                    "The portal kept invalidating the session across the OTP "
+                    "wait even after retrying. Try again in a moment.")
+            self._msg("The session went stale during the wait — starting fresh "
+                      "and resending the OTP; enter the NEW code.")
+            self._payload(otp_error="Session went stale — a new OTP was sent. Enter the new code.")
             masked = prime()
 
         client = st["client"]
-        exit_ip = st["exit_ip"]
 
         # 6. Captcha loop (pause) + submit
         submit = None
@@ -336,7 +311,7 @@ class BookingController:
                 captcha_nonce=uuid.uuid4().hex[:8],
             )
             self._msg("Enter the captcha shown.")
-            value = self._await(bridge, "captcha", PAUSE_TIMEOUT, client)
+            value = bridge.await_input("captcha", timeout=PAUSE_TIMEOUT)
             if value == "__reload__":
                 continue
             self._set(BookingState.SUBMITTING)
@@ -376,19 +351,19 @@ class BookingController:
             ticket_path, receipt_path = files.get("ticket"), files.get("receipt")
 
         # 9. Persist results
-        self._finalize(db, account, event, trek, trekker_ids, exit_ip,
+        self._finalize(db, account, event, trek, trekker_ids,
                        submit, booking_pid, ticket_path, receipt_path)
         self._set(BookingState.COMPLETED, portal_booking_id=booking_pid,
                   ticket_path=ticket_path, receipt_path=receipt_path)
         self._msg("Booking complete. Tickets ready to download."
                   if booking_pid else "Payment step done; ticket not detected yet.")
 
-    def _finalize(self, db, account, event, trek, trekker_ids, exit_ip,
+    def _finalize(self, db, account, event, trek, trekker_ids,
                   submit, booking_pid, ticket_path, receipt_path) -> None:
         booking = Booking(
             event_id=event.id, account_id=account.id, account_email=account.email,
             trek_name=trek.name, check_in=event.check_in, trekker_ids=trekker_ids,
-            state=BookingState.COMPLETED, exit_ip=exit_ip,
+            state=BookingState.COMPLETED,
             order_id=submit.order_id, amount=submit.amount,
             portal_booking_id=booking_pid, ticket_path=ticket_path,
             receipt_path=receipt_path,
@@ -417,10 +392,8 @@ class BookingController:
             db.add(event)
             db.commit()
 
-        # Mark account + IP used (today-only exclusion).
-        mark_account_used(db, account, exit_ip, trek.name)
-        if exit_ip and exit_ip != "direct":
-            record_used_ip(db, exit_ip, account.email, booking.id)
+        # Mark account used (today-only exclusion).
+        mark_account_used(db, account, trek.name)
 
 
 # Module-level singleton.

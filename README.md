@@ -1,8 +1,8 @@
 # Karavan Booking Bot
 
 A local-first web app for booking Karnataka trek tickets (`aranyavihaara.karnataka.gov.in`)
-across a pool of consented accounts, with a fixed sticky-IP proxy layer, an event/roster
-model, a mobile-friendly guided booking wizard, and ticket download + cancel.
+across a pool of consented accounts, over your regular network connection, with an
+event/roster model, a mobile-friendly guided booking wizard, and ticket download + cancel.
 
 > Successor to the standalone `booker.py` (booking) and `dashv2.py` (dashboard) scripts,
 > now unified into one FastAPI app. The originals are kept under `legacy/` for reference.
@@ -53,7 +53,5 @@ data/                SQLite DB + artifacts (gitignored)
 
 - **Secrets:** `seed/`, `data/`, and `.env` hold live credentials and personal data and are
   gitignored. Never commit them.
-- **Proxy:** configure under Settings. ON = sticky Indian IP (Proxy-Cheap); OFF = your normal
-  network / VPN.
 - **OCR:** captcha OCR pre-fill needs Tesseract (bundled in the Docker image); manual entry
   always works without it.

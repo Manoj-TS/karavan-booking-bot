@@ -28,14 +28,14 @@ class FakeTrekPortalClient:
     def ensure_logged_in(self, email: str, password: str) -> bool:
         return True
 
-    def keep_alive(self) -> bool:
-        return True
-
     def get_treks(self, district_id: int) -> List[Dict]:
         return [{"id": 113, "name": "Netravathi"}]
 
     def get_blocked_dates(self, district_id: int, trek_id: int) -> List[str]:
         return []
+
+    def check_availability(self, district_id: int, trek_id: int, check_in: str) -> bool:
+        return True
 
     def select_timeslot(self, trek_id: int, timeslot_mapping_id: int) -> bool:
         self.booking_data["trek_id"] = trek_id

@@ -30,6 +30,11 @@ BASE_URL: str = os.environ.get("BB_BASE_URL", "https://aranyavihaara.karnataka.g
 SECRET_KEY: str = os.environ.get("BB_SECRET_KEY", "dev-secret-change-me")
 OCR_SPACE_KEY: str = os.environ.get("BB_OCR_SPACE_KEY", "helloworld")
 
+# Optional shared-login gate (Basic Auth) for hosted deployments. Unset (the
+# local-dev default) leaves the app open, exactly as before this existed.
+AUTH_USER: str = os.environ.get("BB_AUTH_USER", "")
+AUTH_PASS: str = os.environ.get("BB_AUTH_PASS", "")
+
 APP_NAME: str = "Karavan Booking Bot"
 APP_VERSION: str = "0.1.0"
 

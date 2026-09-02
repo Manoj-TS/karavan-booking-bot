@@ -15,7 +15,7 @@ from typing import Any, Dict, Optional
 
 class BookingState:
     IDLE = "idle"
-    ACQUIRING_PROXY = "acquiring_proxy"
+    STARTING = "starting"
     LOGGING_IN = "logging_in"
     SELECTING_SLOT = "selecting_slot"
     GENERATING_OTP = "generating_otp"
@@ -97,8 +97,6 @@ class BookingSession:
     event_id: Optional[int] = None
     trek_name: Optional[str] = None
     trekker_ids: list = field(default_factory=list)
-    exit_ip: Optional[str] = None
-    proxy_mode: Optional[str] = None
     order_id: Optional[str] = None
     amount: Optional[str] = None
     portal_booking_id: Optional[str] = None
@@ -118,8 +116,6 @@ class BookingSession:
             "event_id": self.event_id,
             "trek_name": self.trek_name,
             "trekker_ids": self.trekker_ids,
-            "exit_ip": self.exit_ip,
-            "proxy_mode": self.proxy_mode,
             "order_id": self.order_id,
             "amount": self.amount,
             "portal_booking_id": self.portal_booking_id,

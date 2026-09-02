@@ -17,11 +17,14 @@ data_dev/
 *.db
 *.sqlite3
 .env
+/config.yaml
 seed/config.yaml
 seed/accounts.yaml
 *.session
 session_cookies*.json
 used_ips.json
+*.har
+rejected_page.html
 
 # --- Booking artifacts ---
 pay.html

@@ -2,9 +2,9 @@
 
 Behavior-preserving refactor: same requests/CSRF/419 handling and the same
 /summaryblade parsing, but with no terminal I/O. It receives a ready-made
-requests.Session (from ProxyManager) and takes trek/trekker data per call, so
-the pausable booking controller owns all human interaction (OTP, captcha,
-payment) instead of blocking on input().
+requests.Session and takes trek/trekker data per call, so the pausable
+booking controller owns all human interaction (OTP, captcha, payment)
+instead of blocking on input().
 """
 from __future__ import annotations
 
@@ -56,8 +56,12 @@ class TrekPortalClient:
         self.ocr_api_key = ocr_api_key
         self.csrf_token: Optional[str] = None
         self.booking_data: Dict = {}
-        self.last_conn_error: Optional[str] = None  # set on proxy/network login failure
+        self.last_conn_error: Optional[str] = None  # set on network login failure
         self.last_submit_html: Optional[str] = None  # last /summaryblade response, for inspection
+        self.last_availability_response: Optional[str] = None  # last /availability request+response
+        self.last_timeslot_response: Optional[str] = None  # last /getTimeslot request+response
+        self.last_form_token: Optional[str] = None  # anti-bot token embedded in the getTimeslot page,
+        # required (alongside the honeypot `website` field) by /summaryblade — see select_timeslot()
 
     # --- URL / CSRF / POST helpers ------------------------------------------
 
@@ -89,8 +93,8 @@ class TrekPortalClient:
         resp = None
         for attempt in range(retries + 1):
             resp = self.session.post(url, data=data, timeout=12, **kwargs)
-            # Fully drain the response so the (single, pinned) proxy connection is
-            # never reused with an unread body -> avoids response bleed.
+            # Fully drain the response so the pooled connection is never reused
+            # with an unread body -> avoids response bleed.
             _ = resp.content
             if resp.status_code == 419 and attempt < retries:
                 logger.warning("419 CSRF expired -> refreshing token")
@@ -101,17 +105,6 @@ class TrekPortalClient:
                 continue
             return resp
         return resp
-
-    def keep_alive(self) -> bool:
-        """Lightweight request to keep the single pinned connection (and thus the
-        proxy exit IP) from idling closed during a human pause. Reuses the pooled
-        connection; the response is fully drained."""
-        try:
-            r = self.session.get(self._url("/home"), timeout=10, allow_redirects=False)
-            _ = r.content
-            return True
-        except Exception:
-            return False
 
     def _is_session_live(self) -> bool:
         try:
@@ -200,11 +193,10 @@ class TrekPortalClient:
                 return True
             logger.error(f"Login failed for {email} | URL: {r.url}")
             return False
-        except (requests.exceptions.ProxyError, requests.exceptions.ConnectionError,
-                requests.exceptions.Timeout) as e:
-            # Proxy/network failure — NOT a bad password. Surface it truthfully.
+        except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as e:
+            # Network failure — NOT a bad password. Surface it truthfully.
             self.last_conn_error = str(e)
-            logger.error(f"Login connection error (proxy/network): {e}")
+            logger.error(f"Login connection error (network): {e}")
             return False
         except Exception as e:
             logger.error(f"Login error: {e}")
@@ -247,16 +239,64 @@ class TrekPortalClient:
             logger.error(f"get_blocked_dates error: {e}")
             return []
 
+    def check_availability(self, district_id: int, trek_id: int, check_in: str) -> bool:
+        """Render the availability/search-results page for this trek + date.
+
+        The real front-end calls this (POST /availability with `district`,
+        `trek`, `check_in` — NOT the `_id`-suffixed names) before selecting a
+        timeslot; it's what registers the chosen date against the session
+        server-side. Best-effort: the response is a full HTML page with no
+        machine-readable success flag, so failures here surface later, at
+        select_timeslot or submit.
+        """
+        try:
+            r = self._post("/availability", {
+                "_token": self.csrf_token,
+                "district": str(district_id),
+                "trek": str(trek_id),
+                "check_in": check_in,
+            })
+            self.last_availability_response = (
+                f"REQUEST: district={district_id} trek={trek_id} check_in={check_in}\n"
+                f"RESPONSE status={r.status_code}\n{r.text}"
+            )
+            m = re.search(r'name="_token"\s+content="([^"]+)"', r.text) or \
+                re.search(r'name="_token"\s+value="([^"]+)"', r.text)
+            if m:
+                self.csrf_token = m.group(1)
+            return r.status_code == 200
+        except Exception as e:
+            logger.error(f"check_availability error: {e}")
+            return False
+
     def select_timeslot(self, trek_id: int, timeslot_mapping_id: int) -> bool:
+        """POST /getTimeslot — returns the booking-summary page, which embeds a
+        `form_token` (anti-bot, distinct from the Laravel `_token`) and a hidden
+        honeypot `website` field. Both must be echoed back in /summaryblade or
+        the portal rejects the submission with a generic "session expired"
+        message even though OTP and captcha both succeeded — this was silently
+        missing before, since select_timeslot only ever checked for a `_token`
+        and never looked for `form_token`.
+        """
         try:
             r = self._post("/getTimeslot", {
                 "_token": self.csrf_token,
                 "trek_id": str(trek_id),
                 "timeslot_mapping_id": str(timeslot_mapping_id),
             })
+            self.last_timeslot_response = (
+                f"REQUEST: trek_id={trek_id} timeslot_mapping_id={timeslot_mapping_id}\n"
+                f"RESPONSE status={r.status_code}\n{r.text}"
+            )  # kept for diagnosis regardless of outcome
             m = re.search(r'name="_token"\s+value="([^"]+)"', r.text)
             if m:
                 self.csrf_token = m.group(1)
+            ft = re.search(r'name="form_token"\s+value="([^"]*)"', r.text)
+            self.last_form_token = ft.group(1) if ft else None
+            if not self.last_form_token:
+                logger.error("getTimeslot response had no form_token — the summary "
+                             "page format may have changed.")
+                return False
             self.booking_data["trek_id"] = trek_id
             self.booking_data["timeslot_mapping_id"] = timeslot_mapping_id
             return True
@@ -340,6 +380,11 @@ class TrekPortalClient:
         if booking_number and prepared:
             prepared[0]["mobile_no"] = booking_number
 
+        if not self.last_form_token:
+            return SubmitResult(False, "error",
+                                message="No form_token captured from the timeslot page — "
+                                        "cannot submit safely. Try again from the start.")
+
         try:
             post_data = {
                 "_token": self.csrf_token,
@@ -348,6 +393,8 @@ class TrekPortalClient:
                 "check_in": check_in,
                 "TimeslotId": str(timeslot_id),
                 "captcha": captcha,
+                "form_token": self.last_form_token,
+                "website": "",  # honeypot field the real form submits empty
             }
             for idx, t in enumerate(prepared):
                 actual = 0 if idx == 0 else idx + 1  # portal skips slot 1 (the user)
@@ -371,15 +418,31 @@ class TrekPortalClient:
 
             # On a redirect (Laravel back()), FOLLOW it and read the real flash
             # message — a redirect is NOT always a captcha error (could be
-            # 'already booked on this IP', session lost, etc.).
+            # 'already booked on this IP', session lost, etc.). Laravel's back()
+            # always lands on whatever URL was last GET-ed in the session, which
+            # is the captcha IMAGE fetch (/captcha?<epoch>) no matter WHY
+            # summaryblade rejected it — that alone is not proof the captcha was
+            # wrong, and following it literally would hand back raw PNG bytes.
+            # /captcha itself has no message to read, so go to /home instead,
+            # where Laravel's flash message survives regardless of which URL
+            # back() picked.
             if r.status_code in (301, 302, 303, 307, 308):
                 loc = r.headers.get("Location", "")
+                follow_url = "/home" if "captcha" in loc.lower() else loc
                 try:
-                    r = self.session.get(self._url(loc), timeout=12)
+                    r = self.session.get(self._url(follow_url), timeout=12)
                     _ = r.content
                 except Exception:
                     return SubmitResult(False, "error",
                                         message="Submit redirected but the follow-up failed.")
+                # Defensive: whatever we followed to, never surface raw binary.
+                fctype = (r.headers.get("Content-Type") or "").lower()
+                if r.content[:4] in (b"\x89PNG", b"\xff\xd8\xff\xe0") or \
+                   (fctype and "html" not in fctype and "text" not in fctype):
+                    self.last_submit_html = "(binary/image response after redirect)"
+                    return SubmitResult(False, "error",
+                                        message="Portal redirected to a non-HTML page after "
+                                                "submit; could not read the rejection reason.")
 
             self.last_submit_html = r.text  # saved by the controller for inspection
 

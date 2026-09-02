@@ -4,11 +4,15 @@ services:
     image: bookingbot:latest
     container_name: bookingbot
     ports:
-      - "8000:8000"
+      - "${BB_PORT:-8000}:8000"
     environment:
       # Override in a .env file or your host's secrets manager.
       BB_DATA_DIR: /data
       BB_SECRET_KEY: ${BB_SECRET_KEY:-change-me-in-production}
+      # Shared login gate (Basic Auth on the whole app) for hosted deployments.
+      # Leave both unset to disable (local-only use).
+      BB_AUTH_USER: ${BB_AUTH_USER:-}
+      BB_AUTH_PASS: ${BB_AUTH_PASS:-}
       # Optional: set to enable AI smart-paste parsing (offline heuristic used if unset).
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
     volumes:
